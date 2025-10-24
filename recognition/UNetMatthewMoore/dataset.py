@@ -11,6 +11,9 @@ def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
 
     return res
 
+#This needs to be run while the cmd line is cd'd into UNetMatthewMoore
+img = nib.load(".\\Data\\HipMRI_Study_open\\keras_slices_data\\keras_slices_seg_test\\seg_040_week_0_slice_0.nii.gz")
+help(img.get_fdata)
 
 '''
 Load medical image data from names, cases list provided into a list for each.
@@ -20,7 +23,7 @@ This function pre-allocates 4D arrays for conv2d to avoid excessive memory usage
 normImage: bool (normalise the image 0.0-1.0)
 early_stop: Stop loading prematurely, leaves arrays mostly empty for quick loading and testing scripts.
 '''
-def load_data_2D (imageNames, normImage=False, categorical=False, dtype=np.float32,
+def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32,
                   getAffines=False, early_stop=False):
     affines = []
 
