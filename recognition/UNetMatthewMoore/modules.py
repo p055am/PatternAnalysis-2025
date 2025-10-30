@@ -43,6 +43,7 @@ class SimpleUNet(nn.Module):
         self.enc3 = self._conv_block(64, 128, dropout_p)
 
         # Decoder (upsampling)
+        # The +64 and +32 are to account fo the skip connections from the encoder
         self.dec3 = self._conv_block(128 + 64, 64, dropout_p)
         self.dec2 = self._conv_block(64 + 32, 32, dropout_p)
         self.dec1 = nn.Conv2d(32, out_channels, 1)
@@ -52,7 +53,8 @@ class SimpleUNet(nn.Module):
         self.sigmoid = nn.Sigmoid()  # Sigmoid activation for final output
 
     def _conv_block(self, in_ch, out_ch, dropout_p=0.2):
-        """Conv block with batch normalization and LeakyReLU: Conv -> BN -> LeakyReLU -> Dropout -> Conv -> BN -> LeakyReLU -> Dropout"""
+        """Conv block with batch normalization and LeakyReLU:
+        Conv -> BN -> LeakyReLU -> Dropout -> Conv -> BN -> LeakyReLU -> Dropout"""
         return nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=1),
             nn.BatchNorm2d(out_ch),
@@ -66,7 +68,7 @@ class SimpleUNet(nn.Module):
 
     def forward(self, x):
         # Encoder
-        e1 = self.enc1(x)          # 64x64
+        e1 = self.enc1(x) # 64x64
         e2 = self.enc2(self.pool(e1))  # 32x32
         e3 = self.enc3(self.pool(e2))  # 16x16
 
