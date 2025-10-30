@@ -231,11 +231,24 @@ subset_size = 1000  # Use 1000 samples for demo
 # subset_size = None  # Uncomment this to use full dataset
 
 print("🔄 Loading datasets (color RGB, normalized to zero mean & unit std)...")
-train_dataset = PetSegmentationDataset('trainval', transform=transform, subset_size=subset_size)
-test_dataset = PetSegmentationDataset('test', transform=transform, subset_size=subset_size//2 if subset_size else None)
+# Get file lists
+print("Getting training data")
+train_img_path = dataset.get_image_path_hip_mri('train', 'image')
+train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
+train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+print(f"Number of training samples: {len(train_dataset)}")
 
-print(f"📚 Training samples: {len(train_dataset)}")
-print(f"🧪 Test samples: {len(test_dataset)}")
+print("Getting validation data")
+validate_img_path = dataset.get_image_path_hip_mri('validate', 'image')
+validate_mask_path = dataset.get_image_path_hip_mri('validate', 'mask')
+validate_dataset = dataset.DataSegmenter2D(validate_img_path, validate_mask_path, subset_size=(subset_size // 2))
+print(f"Number of validation samples: {len(validate_dataset)}")
+
+print("Getting testing data")
+test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
+print(f"Number of test samples: {len(test_dataset)}")
 
 # Data loaders
 train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
@@ -246,7 +259,6 @@ print("✅ Data loaders ready! (Color RGB + Binary masks + 0-1 normalization)")
 # Show examples
 show_examples(train_dataset, "🐕 Color Pet Dataset + Binary Masks (Normalized)")
 
-    
 model = modules.SimpleUNet(in_channels=3, out_channels=1, dropout_p=0.2)
 losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
 plot_loss(losses, loss_type='dice')

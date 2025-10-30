@@ -3,6 +3,8 @@ import nibabel as nib
 from tqdm import tqdm
 import os
 from glob import glob
+import torch
+from torch.utils.data import Dataset
 
 def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
     channels = np.unique(arr)
@@ -70,7 +72,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
 
 # Modified from https://colab.research.google.com/drive/1VOsZSyRhyuHLmgoqGriQk01ub4bKNmZ1?usp=sharing#scrollTo=d9842512
 # and from the responses given by chatGPT in datasetAiUsage.txt
-class DataSegmenter2D:
+class DataSegmenter2D(Dataset):
     """TODO."""
 
     def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
@@ -115,9 +117,9 @@ class DataSegmenter2D:
         else:
             print(f"Using all {self.dataset_size} samples")
         
-        # Loads the subset into memory
-        self.images = load_data_2D(self.image_paths, normImage=True)
-        self.masks = load_data_2D(self.mask_paths, dtype=np.uint8)
+        # Loads the subset into memory as pytorch tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8))
 
         print("Images shape: ", self.images.shape)
         print("Masks shape: ", self.masks.shape)
@@ -165,21 +167,3 @@ def get_image_path_hip_mri(dataset, type):
             return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_train/*.nii.gz"
         else:
             return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_train/*.nii.gz"
-        
-
-
-# Get file lists
-print("Getting training data")
-train_img_path = get_image_path_hip_mri('train', 'image')
-train_mask_path = get_image_path_hip_mri('train', 'mask')
-train_data = DataSegmenter2D(train_img_path, train_mask_path, subset_size=2000)
-
-print("Getting validation data")
-validate_img_path = get_image_path_hip_mri('validate', 'image')
-validate_mask_path = get_image_path_hip_mri('validate', 'mask')
-validate_data = DataSegmenter2D(validate_img_path, validate_mask_path)
-
-print("Getting testing data")
-test_img_path = get_image_path_hip_mri('test', 'image')
-test_mask_path = get_image_path_hip_mri('test', 'mask')
-test_data = DataSegmenter2D(test_img_path, test_mask_path)
