@@ -53,13 +53,11 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
         for batch_idx, (images, masks) in enumerate(train_loader):
             images, masks = images.to(device), masks.to(device)
 
-            print(f"Images size: {images.size()}, masks size: {masks.size()}")
-
             optimizer.zero_grad()
             outputs = model(images)
 
             # print the shape of outputs and masks for debugging
-            print(f"Predicted shape: {outputs.shape}, masks shape: {masks.shape}")
+            # print(f"Predicted shape: {outputs.shape}, masks shape: {masks.shape}")
             loss = criterion(outputs, masks)
 
             # Backward pass
@@ -189,7 +187,7 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
 
             # Predict with sigmoid model
             pred = model(image.unsqueeze(0).to(device)) # The unsqueeze makes sure it has batch dimension
-            pred_mask = torch.argmax(pred.squeeze(0), dim=0).cpu.numpy() # [H, W]
+            pred_mask = torch.argmax(pred.squeeze(0), dim=0).cpu().numpy() # [H, W]
 
             # Ground truth: convert one-hot to class indices
             true_mask_np = torch.argmax(true_mask, dim=0).numpy()
@@ -204,7 +202,7 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
             axes[0, i].axis('off')
 
             # Show ground truth mask
-            axes[1, i].imshow(true_mask, cmap=cmap, vmin=0, vmax=num_classes)
+            axes[1, i].imshow(true_mask_np, cmap=cmap, vmin=0, vmax=num_classes)
             axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
             axes[1, i].axis('off')
 
@@ -280,5 +278,5 @@ show_examples(train_dataset, "Initial examples", starting_index=30)
 
 # 1 input channel because grayscale, 6 output channels because 6 segments
 model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
+losses = train(model, train_loader, test_dataset, epochs=100, lr=0.001, visualize_every=50)
 plot_loss(losses, loss_type='dice')
