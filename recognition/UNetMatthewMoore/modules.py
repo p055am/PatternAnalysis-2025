@@ -50,7 +50,6 @@ class SimpleUNet(nn.Module):
 
         self.pool = nn.MaxPool2d(2)
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.sigmoid = nn.Sigmoid()  # Sigmoid activation for final output
 
     def _conv_block(self, in_ch, out_ch, dropout_p=0.2):
         """Conv block with batch normalization and LeakyReLU:
@@ -76,8 +75,5 @@ class SimpleUNet(nn.Module):
         d3 = self.dec3(torch.cat([self.upsample(e3), e2], 1))  # 32x32
         d2 = self.dec2(torch.cat([self.upsample(d3), e1], 1))  # 64x64
         out = self.dec1(d2)
-
-        # Apply sigmoid activation to final output
-        out = self.sigmoid(out)
 
         return out

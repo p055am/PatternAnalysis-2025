@@ -2984,3 +2984,545 @@ If your model already outputs **softmax probabilities**, it will skip the softma
 * You can easily extend it to **class-weighted Dice loss** if some classes are rare — just ask and I can show that variant too.
 
 Would you like me to merge **CrossEntropyLoss + DiceLoss** into a **combined hybrid loss** (common in multi-class medical segmentation)?
+===================================================================================================
+By this point, the model was not crashing, but it was not training properly. I had several 
+ideas on why this was.
+
+Prompt:
+Here is my training code. I have several issues.
+1. I don't think the GPU is being properly utilitsed. The device is correctly set to cuda, but I don't think things are being sent to the device.
+2. I think something must be wrong with either the Dice score function or the prediction function. While training, the dice score goes down over time, but when testing the accuracy is extremely low. The test seems to show the body of the prediction is the only thing being identified, with nothing else.
+Let me know if there might be other reasons I am encountering these issues other than the ones I've suggested.
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+import os
+from PIL import Image
+from tqdm import tqdm
+import random
+import modules
+import dataset
+
+# Check if CUDA is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+
+def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every=1):
+    model.to(device)
+    criterion = DiceLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    losses = []
+
+    print(" Starting training with Batch Norm, LeakyReLU, and Sigmoid activation...")
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+
+        # Training loop with progress
+        for batch_idx, (images, masks) in enumerate(train_loader):
+            images, masks = images.to(device), masks.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+
+            # print the shape of outputs and masks for debugging
+            # print(f"Predicted shape: {outputs.shape}, masks shape: {masks.shape}")
+            loss = criterion(outputs, masks)
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        avg_loss = epoch_loss / len(train_loader)
+        losses.append(avg_loss)
+        print(f"📈 Epoch {epoch+1}/{epochs} Complete: Avg Loss = {avg_loss:.4f}")
+
+        # Visualize predictions after each epoch (or every few epochs)
+        if (epoch) % visualize_every == 0:
+            show_epoch_predictions(model, test_dataset, epoch + 1, n=3)
+
+    print(" Training complete with enhanced U-Net!")
+    return losses
+
+
+class DiceLoss(nn.Module):
+    """Multi-class Dice Loss function
+
+    Dice Loss = 1 - Dice Coefficient
+    Dice Coefficient = (2 * |X ∩ Y|) / (|X| + |Y|)
+
+    Args:
+        smooth (float): Smoothing factor to avoid division by zero (default: 1e-6)
+    """
+    def __init__(self, smooth=1e-6):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, predictions, targets):
+        """
+        Args:
+            predictions: Raw model outputs or propabilities [B, C, H, W]
+            targets: One-hot encoded ground truth masks [B, C, H, W]
+        """
+        # If predictions are not probabilities, apply softmax across classes
+        if predictions.shape != targets.shape:
+            raise ValueError(f"Shape mismatch: predictions {predictions.shape}, targets {targets.shape}")
+
+        # Convert logits to probabilities (if not already)
+        if not torch.all((predictions >= 0) & (predictions <= 1)):
+            predictions = F.softmax(predictions, dim=1)
+
+        # Flatten each class for batchwise computation
+        predictions = predictions.contiguous().view(predictions.shape[0], predictions.shape[1], -1)
+        targets = targets.contiguous().view(targets.shape[0], targets.shape[1], -1).float()
+
+        # Compute intersection and union per class
+        intersection = (predictions * targets).sum(dim=2)
+        dice_score = (2.0 * intersection + self.smooth) / (
+            predictions.sum(dim=2) + targets.sum(dim=2) + self.smooth
+        )
+
+        # Average across classes and batch
+        dice_loss = 1 - dice_score.mean()
+
+        return dice_loss
+    
+
+#create visualization functions
+
+def denormalize_image(tensor):
+    """Denormalize a tensor image with ImageNet mean and std."""
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    denorm_tensor = tensor * std + mean
+    return torch.clamp(denorm_tensor, 0, 1)
+
+def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, starting_index=0):
+    """Quick visualization of some Hip MRI data, with labelled masks."""
+    fig, axes = plt.subplots(2, n, figsize=(12, 6))
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+
+    # Define a color map for masks (one color per class)
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    segment_colors = ['black', 'red', 'green', 'blue', 'yellow', 'magenta'][:num_classes]
+    cmap = ListedColormap(segment_colors) # type: ignore
+
+    for i in range(n):
+        index = i + starting_index
+        image, mask = dataset[index] # mask is one-hot: [C, H, W]. 
+
+        # Denormalize image for visualization
+        img_show = denormalize_image(image)
+
+        # Show image (transpose from CHW to HWC for matplotlib)
+        img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
+        axes[0, i].imshow(img_display, cmap='gray')
+        axes[0, i].set_title(f'Hip Image {index+1}', fontweight='bold')
+        axes[0, i].axis('off')
+
+        # Convert one-hot mask to a single integer mask for plotting
+        # mask: [C,H,W] -> [H,W] with values 0..num_classes-1
+        mask_np = torch.argmax(mask, dim=0).numpy()
+
+        im = axes[1, i].imshow(mask_np, cmap=cmap, vmin=0, vmax=num_classes-1)
+        axes[1, i].set_title(f'Mask {index+1}', fontweight='bold')
+        axes[1, i].axis('off')
+
+        # Add colorbar for the first image to show the scale
+        if i == 0:
+            cbar = plt.colorbar(im, ax=axes[1, i], shrink=0.6, ticks=range(num_classes))
+            cbar.ax.set_yticklabels(segment_labels)
+            cbar.set_label('Hip MRI Segments', rotation=270, labelpad=15)
+
+    plt.tight_layout()
+    plt.show()
+
+def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
+    """Show model predictions after a specific epoch."""
+    model.eval()
+    fig, axes = plt.subplots(3, n, figsize=(12, 9))
+    fig.suptitle(f'🎯 Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
+
+    # Segment labels and colors (same as show_examples)
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    segment_colors = ['black', 'orange', 'blue', 'green', 'red', 'magenta'][:num_classes]
+    cmap = ListedColormap(segment_colors)
+
+    with torch.no_grad():
+        for i in range(n):
+            image, true_mask = dataset[i]
+
+            # Predict with sigmoid model
+            pred = model(image.unsqueeze(0).to(device)) # The unsqueeze makes sure it has batch dimension
+            pred_mask = torch.argmax(pred.squeeze(0), dim=0).cpu().numpy() # [H, W]
+
+            # Ground truth: convert one-hot to class indices
+            true_mask_np = torch.argmax(true_mask, dim=0).numpy()
+
+            # Denormalize image for visualization
+            img_show = denormalize_image(image)
+
+            # Show original color image (transpose from CHW to HWC for matplotlib)
+            img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
+            axes[0, i].imshow(img_display, cmap='gray')
+            axes[0, i].set_title(f'Original {i+1}', fontweight='bold')
+            axes[0, i].axis('off')
+
+            # Show ground truth mask
+            axes[1, i].imshow(true_mask_np, cmap=cmap, vmin=0, vmax=num_classes)
+            axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
+            axes[1, i].axis('off')
+
+            # Show prediction with accuracy
+            axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=1)
+            accuracy = np.mean(pred_mask == true_mask.numpy())
+            axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
+            axes[2, i].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+    model.train()  # Switch back to training mode
+
+# Quick visualization of loss
+def plot_loss(losses, loss_type='dice'):
+    plt.figure(figsize=(8, 4))
+    plt.plot(losses, 'bo-', linewidth=2, markersize=8)
+
+    title_map = {
+        'bce': '🔥 Training Loss (BCE)',
+        'dice': '🔥 Training Loss (Dice)',
+        'combined': '🔥 Training Loss (Combined BCE + Dice)'
+    }
+    plt.title(title_map.get(loss_type, '🔥 Training Loss'), fontsize=14, fontweight='bold')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+# Create datasets with subset for faster training/demo
+# Set subset_size=None to use full dataset, or specify a number for quick demo
+subset_size = 500  # Use 100 samples for demo
+# subset_size = None  # Uncomment this to use full dataset
+
+print("🔄 Loading datasets (normalized to zero mean & unit std)...")
+# Get file lists
+print("Getting training data")
+train_img_path = dataset.get_image_path_hip_mri('train', 'image')
+train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
+train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+print(f"Number of training samples: {len(train_dataset)}")
+
+print("Getting validation data")
+validate_img_path = dataset.get_image_path_hip_mri('validate', 'image')
+validate_mask_path = dataset.get_image_path_hip_mri('validate', 'mask')
+validate_dataset = dataset.DataSegmenter2D(validate_img_path, validate_mask_path, subset_size=(subset_size // 2))
+print(f"Number of validation samples: {len(validate_dataset)}")
+
+print("Getting testing data")
+test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
+print(f"Number of test samples: {len(test_dataset)}")
+
+# Data loaders
+train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
+
+# Show examples
+show_examples(train_dataset, "Initial examples", starting_index=30)
+
+# 1 input channel because grayscale, 6 output channels because 6 segments
+model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
+losses = train(model, train_loader, test_dataset, epochs=102, lr=0.001, visualize_every=50)
+plot_loss(losses, loss_type='dice')
+
+
+
+In case it is useful, here is also my SimpleUNet:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from PIL import Image
+from tqdm import tqdm
+import random
+
+# Check if CUDA is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+
+class SimpleUNet(nn.Module):
+    """Simplified U-Net for demo purposes with batch normalization, LeakyReLU, dropout and sigmoid activation."""
+
+    def __init__(self, in_channels=3, out_channels=1, dropout_p=0.2):
+        super().__init__()
+
+        # Encoder (downsampling)
+        self.enc1 = self._conv_block(in_channels, 32, dropout_p)
+        self.enc2 = self._conv_block(32, 64, dropout_p)
+        self.enc3 = self._conv_block(64, 128, dropout_p)
+
+        # Decoder (upsampling)
+        # The +64 and +32 are to account fo the skip connections from the encoder
+        self.dec3 = self._conv_block(128 + 64, 64, dropout_p)
+        self.dec2 = self._conv_block(64 + 32, 32, dropout_p)
+        self.dec1 = nn.Conv2d(32, out_channels, 1)
+
+        self.pool = nn.MaxPool2d(2)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.sigmoid = nn.Sigmoid()  # Sigmoid activation for final output
+
+    def _conv_block(self, in_ch, out_ch, dropout_p=0.2):
+        """Conv block with batch normalization and LeakyReLU:
+        Conv -> BN -> LeakyReLU -> Dropout -> Conv -> BN -> LeakyReLU -> Dropout"""
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Dropout2d(dropout_p),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Dropout2d(dropout_p)
+        )
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x) # 64x64
+        e2 = self.enc2(self.pool(e1))  # 32x32
+        e3 = self.enc3(self.pool(e2))  # 16x16
+
+        # Decoder with skip connections
+        d3 = self.dec3(torch.cat([self.upsample(e3), e2], 1))  # 32x32
+        d2 = self.dec2(torch.cat([self.upsample(d3), e1], 1))  # 64x64
+        out = self.dec1(d2)
+
+        # Apply sigmoid activation to final output
+        out = self.sigmoid(out)
+
+        return out
+---------------------------------------------------------------------------------------------------
+Response:
+Great — thank you for sharing the full context, this helps a lot.
+You’ve identified two of the most common and correct pain points when training multi-class segmentation models like this.
+
+Let’s go through your issues methodically.
+
+---
+
+## ⚠️ Problem 1: GPU not being properly utilized
+
+Even though `device = torch.device("cuda")` is set correctly, several things in your code **prevent the GPU from being used effectively**:
+
+### 1️⃣ The model is correctly moved to GPU (`model.to(device)`), ✅ but:
+
+* Inside your `show_epoch_predictions`, you call:
+
+  ```python
+  image, true_mask = dataset[i]
+  ```
+
+  — which loads a CPU tensor, and you only move the **image** to GPU (`.to(device)`), not the mask.
+  That’s fine for inference, but it’s important that in training, both `images` and `masks` in the dataloader batch are `.to(device)` — which you **do** in the training loop, so training *should* run on GPU.
+
+✅ So GPU should be used for training, but…
+
+### 2️⃣ The problem may be that tensors are **not contiguous** or of the wrong dtype:
+
+In `DataSegmenter2D`, masks are loaded as `uint8`.
+When you do:
+
+```python
+images, masks = images.to(device), masks.to(device)
+```
+
+If masks are integer-type tensors, PyTorch will throw a silent warning (or no-op) because `.to(device)` can’t move non-floating tensors to CUDA unless you cast them properly.
+
+So ensure:
+
+```python
+images = images.float().to(device)
+masks = masks.float().to(device)
+```
+
+✅ **Fix:**
+In your training loop:
+
+```python
+for batch_idx, (images, masks) in enumerate(train_loader):
+    images = images.float().to(device)
+    masks = masks.float().to(device)
+```
+
+---
+
+## ⚠️ Problem 2: Dice score decreasing and poor test predictions
+
+You’re absolutely right — this is very likely due to **output activation and loss mismatch**.
+
+Let’s explain.
+
+---
+
+### 🔍 Root cause 1: Using `Sigmoid` for multi-class output
+
+Your `SimpleUNet` ends with:
+
+```python
+self.sigmoid = nn.Sigmoid()
+out = self.sigmoid(out)
+```
+
+That’s fine for **binary segmentation**, but for **multi-class segmentation**, you should **remove the sigmoid** and instead apply **softmax** during training (inside the loss).
+
+#### Why?
+
+* `Sigmoid` treats every channel as an *independent* binary label — meaning pixels can belong to multiple classes simultaneously.
+* But in your hip MRI dataset, each pixel belongs to **exactly one** of the 6 segments → mutually exclusive classes.
+
+✅ Therefore, you should **remove the final sigmoid**:
+
+```python
+# REMOVE:
+self.sigmoid = nn.Sigmoid()
+
+# And in forward:
+# REMOVE this line:
+# out = self.sigmoid(out)
+return out
+```
+
+Your Dice loss already handles the softmax correctly.
+
+---
+
+### 🔍 Root cause 2: Mask encoding mismatch
+
+You’re one-hot encoding the masks (`[B, C, H, W]`) — good 👍 —
+but check that your model outputs **the same shape** `[B, C, H, W]`.
+
+If the masks come out as `[B, H, W, C]`, you must permute them:
+
+```python
+self.masks = torch.from_numpy(load_data_2D(...)).permute(0, 3, 1, 2)
+```
+
+Otherwise, your Dice loss compares mismatched axes.
+
+✅ Verify by printing once:
+
+```python
+print("Model output shape:", outputs.shape)
+print("Mask shape:", masks.shape)
+```
+
+They should be **identical**.
+
+---
+
+### 🔍 Root cause 3: Dice loss normalization
+
+You’re using:
+
+```python
+predictions = F.softmax(predictions, dim=1)
+```
+
+Good — but you might want to clip to `[0, 1]` to stabilize training:
+
+```python
+predictions = torch.clamp(F.softmax(predictions, dim=1), 1e-7, 1 - 1e-7)
+```
+
+---
+
+### 🔍 Root cause 4: Poor accuracy in visualization
+
+In your visualization, you have:
+
+```python
+accuracy = np.mean(pred_mask == true_mask.numpy())
+```
+
+But `true_mask` is still **one-hot encoded**, so this comparison is invalid.
+
+✅ Fix:
+
+```python
+true_mask_np = torch.argmax(true_mask, dim=0).numpy()
+accuracy = np.mean(pred_mask == true_mask_np)
+```
+
+---
+
+## 🧠 Additional Recommendations
+
+### 1. Use `CrossEntropyLoss + DiceLoss` combined
+
+This often improves multi-class segmentation stability:
+
+```python
+criterion = lambda pred, target: 0.5 * F.cross_entropy(pred, torch.argmax(target, dim=1)) + 0.5 * DiceLoss()(pred, target)
+```
+
+---
+
+### 2. Track per-class Dice scores (for debugging)
+
+To see if only one class is being learned (like “body outline”):
+
+```python
+dice_per_class = (2 * intersection + smooth) / (pred.sum(dim=2) + target.sum(dim=2) + smooth)
+print("Per-class dice:", dice_per_class.mean(0))
+```
+
+---
+
+### ✅ Summary of Fixes
+
+| Problem                      | Fix                                                               |
+| ---------------------------- | ----------------------------------------------------------------- |
+| GPU not utilized             | Ensure `images.float().to(device)` and `masks.float().to(device)` |
+| Wrong activation             | Remove `Sigmoid` from final U-Net layer                           |
+| Wrong mask shape             | Use `.permute(0, 3, 1, 2)` after loading masks                    |
+| Visualization accuracy wrong | Compare with `argmax(true_mask)`                                  |
+| Training stability           | Consider mixing CrossEntropy + Dice loss                          |
+
+---
+
+Would you like me to rewrite your `SimpleUNet` and training loop with all these fixes applied (clean, ready-to-run)? It’ll make it much easier to debug GPU usage and training stability.

@@ -51,7 +51,8 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
 
         # Training loop with progress
         for batch_idx, (images, masks) in enumerate(train_loader):
-            images, masks = images.to(device), masks.to(device)
+            # Apparantly, non-floating tensors can't be moved to CUDA
+            images, masks = images.float().to(device), masks.float().to(device)
 
             optimizer.zero_grad()
             outputs = model(images)
@@ -207,8 +208,8 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
             axes[1, i].axis('off')
 
             # Show prediction with accuracy
-            axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=1)
-            accuracy = np.mean(pred_mask == true_mask.numpy())
+            axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=num_classes)
+            accuracy = np.mean(pred_mask == true_mask_np)
             axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
             axes[2, i].axis('off')
 
@@ -232,21 +233,9 @@ def plot_loss(losses, loss_type='dice'):
     plt.grid(True, alpha=0.3)
     plt.show()
 
-
-
-# Transforms for color demo with normalization to zero mean and unit std
-transform = transforms.Compose([
-    transforms.Resize((64, 64)),
-    transforms.ToTensor(),  # This converts to 0-1 range automatically for RGB
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],  # ImageNet RGB means
-        std=[0.229, 0.224, 0.225]    # ImageNet RGB standard deviations
-    )
-])
-
 # Create datasets with subset for faster training/demo
 # Set subset_size=None to use full dataset, or specify a number for quick demo
-subset_size = 100  # Use 100 samples for demo
+subset_size = 500  # Use 100 samples for demo
 # subset_size = None  # Uncomment this to use full dataset
 
 print("🔄 Loading datasets (normalized to zero mean & unit std)...")
@@ -278,5 +267,5 @@ show_examples(train_dataset, "Initial examples", starting_index=30)
 
 # 1 input channel because grayscale, 6 output channels because 6 segments
 model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-losses = train(model, train_loader, test_dataset, epochs=100, lr=0.001, visualize_every=50)
+losses = train(model, train_loader, test_dataset, epochs=21, lr=0.001, visualize_every=10)
 plot_loss(losses, loss_type='dice')
