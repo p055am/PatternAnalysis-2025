@@ -1,6 +1,8 @@
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
+import os
+from glob import glob
 
 def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
     channels = np.unique(arr)
@@ -10,10 +12,6 @@ def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
         res[..., c:c+1][arr == c] = 1
 
     return res
-
-#This needs to be run while the cmd line is cd'd into UNetMatthewMoore
-img = nib.load(".\\Data\\HipMRI_Study_open\\keras_slices_data\\keras_slices_seg_test\\seg_040_week_0_slice_0.nii.gz")
-help(img.get_fdata)
 
 '''
 Load medical image data from names, cases list provided into a list for each.
@@ -67,3 +65,29 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
         return images, affines
     else:
         return images
+
+
+# Get file lists
+# These image paths require being called in UNetMatthewMoore
+train_img_files = sorted(glob("Data/HipMRI_Study_open/keras_slices_data/keras_slices_train/*.nii.gz"))
+train_mask_files = sorted(glob("Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_train/*.nii.gz"))
+
+val_img_files = sorted(glob("Data/HipMRI_Study_open/keras_slices_data/keras_slices_validate/*.nii.gz"))
+val_mask_files = sorted(glob("Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_validate/*.nii.gz"))
+
+
+#Gets the number of files in the list.
+print("Number of training image files: ", len(train_img_files))
+print("Number of training mask files: ", len(train_mask_files))
+
+print("Number of evaluation image files: ", len(val_img_files))
+print("Number of evaluation mask files: ", len(val_mask_files))
+
+# Load into memory (can use early_stop=True while testing)
+X_train = load_data_2D(train_img_files, normImage=True)
+y_train = load_data_2D(train_mask_files, categorical=True, dtype=np.uint8)
+
+X_val = load_data_2D(val_img_files, normImage=True)
+y_val = load_data_2D(val_mask_files, categorical=True, dtype=np.uint8)
+
+print(X_train.shape, y_train.shape)
