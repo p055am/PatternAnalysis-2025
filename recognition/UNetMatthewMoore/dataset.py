@@ -95,7 +95,7 @@ class DataSegmenter2D:
 
         # Remove elements before the starting index
         if (self.dataset_size <= start_index):
-            print(f"Warning: start index ({start_index}) >= the size of the data ({size}). No data will be stored.")
+            print(f"Warning: start index ({start_index}) >= the size of the data ({self.dataset_size}). No data will be stored.")
         self.image_paths = self.image_paths[start_index:]
         self.mask_paths = self.mask_paths[start_index:]
 
@@ -141,7 +141,7 @@ val_img_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_validate/*
 val_mask_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_validate/*.nii.gz"
 
 print("Creating training data segmenter")
-dataSegmenter = DataSegmenter2D(train_img_path, train_mask_path, subset_size=800)
+dataSegmenter = DataSegmenter2D(train_img_path, train_mask_path, subset_size=200, start_index=200)
 
 print("Creating evaluator data segmenter")
-dataSegmenter = DataSegmenter2D(val_img_path, val_mask_path, subset_size=400)
+dataSegmenter = DataSegmenter2D(val_img_path, val_mask_path, subset_size=100, start_index=600)
