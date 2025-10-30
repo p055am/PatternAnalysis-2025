@@ -58,10 +58,9 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
             optimizer.zero_grad()
             outputs = model(images)
 
-            pred_pet = outputs[:, 0]  # Pet class probability from sigmoid
-            #print the shape of pred_pet and masks for debugging
-            # print(f"pred_pet shape: {outputs.shape}, masks shape: {masks.shape}")
-            loss = criterion(pred_pet, masks)
+            # print the shape of outputs and masks for debugging
+            print(f"Predicted shape: {outputs.shape}, masks shape: {masks.shape}")
+            loss = criterion(outputs, masks)
 
             # Backward pass
             loss.backward()
@@ -82,7 +81,7 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
 
 
 class DiceLoss(nn.Module):
-    """Dice Loss for binary segmentation.
+    """Multi-class Dice Loss function
 
     Dice Loss = 1 - Dice Coefficient
     Dice Coefficient = (2 * |X ∩ Y|) / (|X| + |Y|)
@@ -97,19 +96,31 @@ class DiceLoss(nn.Module):
     def forward(self, predictions, targets):
         """
         Args:
-            predictions: Sigmoid output from model [B, H, W] (values between 0-1)
-            targets: Binary ground truth [B, H, W] (values 0 or 1)
+            predictions: Raw model outputs or propabilities [B, C, H, W]
+            targets: One-hot encoded ground truth masks [B, C, H, W]
         """
-        # Flatten tensors using reshape to handle non-contiguous memory layout
-        predictions = predictions.reshape(-1)
-        targets = targets.reshape(-1).float()
+        # If predictions are not probabilities, apply softmax across classes
+        if predictions.shape != targets.shape:
+            raise ValueError(f"Shape mismatch: predictions {predictions.shape}, targets {targets.shape}")
 
-        # Calculate intersection and union
-        intersection = (predictions * targets).sum()
-        dice_coeff = (2.0 * intersection + self.smooth) / (predictions.sum() + targets.sum() + self.smooth)
+        # Convert logits to probabilities (if not already)
+        if not torch.all((predictions >= 0) & (predictions <= 1)):
+            predictions = F.softmax(predictions, dim=1)
 
-        # Return Dice Loss (1 - Dice Coefficient)
-        return 1 - dice_coeff
+        # Flatten each class for batchwise computation
+        predictions = predictions.contiguous().view(predictions.shape[0], predictions.shape[1], -1)
+        targets = targets.contiguous().view(targets.shape[0], targets.shape[1], -1).float()
+
+        # Compute intersection and union per class
+        intersection = (predictions * targets).sum(dim=2)
+        dice_score = (2.0 * intersection + self.smooth) / (
+            predictions.sum(dim=2) + targets.sum(dim=2) + self.smooth
+        )
+
+        # Average across classes and batch
+        dice_loss = 1 - dice_score.mean()
+
+        return dice_loss
     
 
 #create visualization functions
@@ -138,15 +149,15 @@ def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, startin
         # Denormalize image for visualization
         img_show = denormalize_image(image)
 
-        # Show color image (transpose from CHW to HWC for matplotlib)
+        # Show image (transpose from CHW to HWC for matplotlib)
         img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
         axes[0, i].imshow(img_display, cmap='gray')
         axes[0, i].set_title(f'Hip Image {index+1}', fontweight='bold')
         axes[0, i].axis('off')
 
         # Convert one-hot mask to a single integer mask for plotting
-        # mask: [H,W,C] -> [H,W] with values 0..num_classes-1
-        mask_np = torch.argmax(mask, dim=2).numpy()
+        # mask: [C,H,W] -> [H,W] with values 0..num_classes-1
+        mask_np = torch.argmax(mask, dim=0).numpy()
 
         im = axes[1, i].imshow(mask_np, cmap=cmap, vmin=0, vmax=num_classes-1)
         axes[1, i].set_title(f'Mask {index+1}', fontweight='bold')
@@ -161,39 +172,45 @@ def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, startin
     plt.tight_layout()
     plt.show()
 
-def show_epoch_predictions(model, dataset, epoch, n=3):
+def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
     """Show model predictions after a specific epoch."""
     model.eval()
     fig, axes = plt.subplots(3, n, figsize=(12, 9))
     fig.suptitle(f'🎯 Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
+
+    # Segment labels and colors (same as show_examples)
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    segment_colors = ['black', 'orange', 'blue', 'green', 'red', 'magenta'][:num_classes]
+    cmap = ListedColormap(segment_colors)
 
     with torch.no_grad():
         for i in range(n):
             image, true_mask = dataset[i]
 
             # Predict with sigmoid model
-            pred = model(image.unsqueeze(0).to(device))
-            # Get pet class probability and convert to binary
-            pred_pet_prob = pred[0, 0].cpu().numpy()  # Pet class probability
-            pred_binary = (pred_pet_prob > 0.5).astype(int)  # Binary prediction
+            pred = model(image.unsqueeze(0).to(device)) # The unsqueeze makes sure it has batch dimension
+            pred_mask = torch.argmax(pred.squeeze(0), dim=0).cpu.numpy() # [H, W]
+
+            # Ground truth: convert one-hot to class indices
+            true_mask_np = torch.argmax(true_mask, dim=0).numpy()
 
             # Denormalize image for visualization
             img_show = denormalize_image(image)
 
             # Show original color image (transpose from CHW to HWC for matplotlib)
             img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
-            axes[0, i].imshow(img_display)
+            axes[0, i].imshow(img_display, cmap='gray')
             axes[0, i].set_title(f'Original {i+1}', fontweight='bold')
             axes[0, i].axis('off')
 
-            # Show ground truth binary mask
-            axes[1, i].imshow(true_mask, cmap='RdYlBu_r', vmin=0, vmax=1)
+            # Show ground truth mask
+            axes[1, i].imshow(true_mask, cmap=cmap, vmin=0, vmax=num_classes)
             axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
             axes[1, i].axis('off')
 
             # Show prediction with accuracy
-            axes[2, i].imshow(pred_binary, cmap='RdYlBu_r', vmin=0, vmax=1)
-            accuracy = np.mean(pred_binary == true_mask.numpy())
+            axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=1)
+            accuracy = np.mean(pred_mask == true_mask.numpy())
             axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
             axes[2, i].axis('off')
 
@@ -261,6 +278,7 @@ test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
 # Show examples
 show_examples(train_dataset, "Initial examples", starting_index=30)
 
-model = modules.SimpleUNet(in_channels=1, out_channels=1, dropout_p=0.2)
+# 1 input channel because grayscale, 6 output channels because 6 segments
+model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
 losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
 plot_loss(losses, loss_type='dice')

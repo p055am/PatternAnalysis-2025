@@ -2730,3 +2730,257 @@ This will give you a clear visualization of both **grayscale MRI slices** and **
 
 Do you want me to also **overlay the masks on the MRI images** for better visual clarity?
 ===================================================================================================
+Next, I needed to replicate and modify this code for showing epoch predictions
+
+Prompt:
+Alter this epoch predictions function to use the same system as the show_examples function, and to work with the hip mri data
+
+def show_epoch_predictions(model, dataset, epoch, n=3):
+    """Show model predictions after a specific epoch."""
+    model.eval()
+    fig, axes = plt.subplots(3, n, figsize=(12, 9))
+    fig.suptitle(f'🎯 Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
+
+    with torch.no_grad():
+        for i in range(n):
+            image, true_mask = dataset[i]
+
+            # Predict with sigmoid model
+            pred = model(image.unsqueeze(0).to(device))
+            # Get pet class probability and convert to binary
+            pred_pet_prob = pred[0, 0].cpu().numpy()  # Organ class probability
+            pred_binary = (pred_pet_prob > 0.5).astype(int)  # Binary prediction
+
+            # Denormalize image for visualization
+            img_show = denormalize_image(image)
+
+            # Show original color image (transpose from CHW to HWC for matplotlib)
+            img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
+            axes[0, i].imshow(img_display)
+            axes[0, i].set_title(f'Original {i+1}', fontweight='bold')
+            axes[0, i].axis('off')
+
+            # Show ground truth binary mask
+            axes[1, i].imshow(true_mask, cmap='RdYlBu_r', vmin=0, vmax=1)
+            axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
+            axes[1, i].axis('off')
+
+            # Show prediction with accuracy
+            axes[2, i].imshow(pred_binary, cmap='RdYlBu_r', vmin=0, vmax=1)
+            accuracy = np.mean(pred_binary == true_mask.numpy())
+            axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
+            axes[2, i].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+    model.train()  # Switch back to training mode
+---------------------------------------------------------------------------------------------------
+Response:
+Here’s a modified `show_epoch_predictions` function adapted for **Hip MRI** data, with **one-hot encoded masks** and the same color/label system as your `show_examples` function:
+
+```python
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+import torch
+import numpy as np
+
+def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
+    """
+    Show model predictions after a specific epoch for Hip MRI dataset.
+
+    Args:
+        model: trained PyTorch UNet model
+        dataset: PyTorch Dataset returning (image, one-hot mask)
+        epoch: current epoch number (for title)
+        n: number of samples to show
+        num_classes: number of segmentation classes
+    """
+    model.eval()
+    fig, axes = plt.subplots(3, n, figsize=(4*n, 12))
+    fig.suptitle(f'🎯 Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
+
+    # Segment labels and colors (same as show_examples)
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    segment_colors = ['black', 'orange', 'blue', 'green', 'red', 'magenta'][:num_classes]
+    cmap = ListedColormap(segment_colors)
+
+    with torch.no_grad():
+        for i in range(n):
+            image, true_mask = dataset[i]
+
+            # Ensure image has batch dim and move to device
+            image_batch = image.unsqueeze(0).to(device)  # [1, C, H, W]
+
+            # Predict
+            pred = model(image_batch)  # Output shape: [1, num_classes, H, W] if multi-class
+            pred_mask = torch.argmax(pred.squeeze(0), dim=0).cpu().numpy()  # [H, W]
+
+            # Ground truth: convert one-hot to class indices
+            true_mask_np = torch.argmax(true_mask, dim=0).numpy()
+
+            # Denormalize image for display
+            if image.ndim == 3 and image.shape[0] == 1:
+                img_np = image.squeeze(0).numpy()  # grayscale
+            else:
+                img_np = image.permute(1, 2, 0).numpy()  # HWC
+
+            # Show original MRI
+            axes[0, i].imshow(img_np, cmap='gray')
+            axes[0, i].set_title(f'Image {i+1}', fontweight='bold')
+            axes[0, i].axis('off')
+
+            # Show ground truth mask
+            im_gt = axes[1, i].imshow(true_mask_np, cmap=cmap, vmin=0, vmax=num_classes-1)
+            axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
+            axes[1, i].axis('off')
+
+            # Show predicted mask
+            im_pred = axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=num_classes-1)
+            accuracy = np.mean(pred_mask == true_mask_np)
+            axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
+            axes[2, i].axis('off')
+
+            # Add colorbar for first prediction only
+            if i == 0:
+                cbar = plt.colorbar(im_pred, ax=axes[2, i], shrink=0.6, ticks=range(num_classes))
+                cbar.ax.set_yticklabels(segment_labels)
+                cbar.set_label('Hip MRI Segments', rotation=270, labelpad=15)
+
+    plt.tight_layout()
+    plt.show()
+    model.train()
+```
+
+---
+
+### ✅ Key changes:
+
+1. **One-hot masks** are converted to integer labels using `torch.argmax`.
+2. Prediction also uses `torch.argmax` along the class/channel dimension.
+3. Original MRI images are shown in **grayscale**.
+4. Masks (ground truth and prediction) use a **consistent color map** with labeled colorbar.
+5. Accuracy per sample is computed as the fraction of pixels correctly classified.
+
+This will now work seamlessly with your **Hip MRI dataset with 6 segmented regions**.
+
+Do you want me to also **overlay the predicted masks on the MRI images** for better visual comparison?
+===================================================================================================
+In order to test the epoch predictions, an epoch actually has to be completed. To do this, 
+the loss function needs to be fixed to work with the data set's multiple segments
+
+Prompt:
+Change this dice loss function to work with multiple classes, rather than being binary like it is here
+
+
+class DiceLoss(nn.Module):
+    """Dice Loss for image classification
+
+    Dice Loss = 1 - Dice Coefficient
+    Dice Coefficient = (2 * |X ∩ Y|) / (|X| + |Y|)
+
+    Args:
+        smooth (float): Smoothing factor to avoid division by zero (default: 1e-6)
+    """
+    def __init__(self, smooth=1e-6):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, predictions, targets):
+        """
+        Args:
+            predictions: Sigmoid output from model [B, H, W] (values between 0-1)
+            targets: Binary ground truth [B, H, W] (values 0 or 1)
+        """
+        # Flatten tensors using reshape to handle non-contiguous memory layout
+        predictions = predictions.reshape(-1)
+        targets = targets.reshape(-1).float()
+
+        # Calculate intersection and union
+        intersection = (predictions * targets).sum()
+        dice_coeff = (2.0 * intersection + self.smooth) / (predictions.sum() + targets.sum() + self.smooth)
+
+        # Return Dice Loss (1 - Dice Coefficient)
+        return 1 - dice_coeff
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — to make your **DiceLoss** work with **multi-class segmentation** (like your 6-class Hip MRI masks), you need to:
+
+1. Compute the Dice coefficient **per class**,
+2. Then average across all classes (macro-average).
+
+Here’s a modified and fully working version:
+
+---
+
+### ✅ **Multi-Class Dice Loss Implementation**
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DiceLoss(nn.Module):
+    """Multi-class Dice Loss for segmentation tasks.
+    
+    Dice Loss = 1 - (2 * |X ∩ Y|) / (|X| + |Y|)
+
+    Works with softmax predictions and one-hot encoded targets.
+    """
+
+    def __init__(self, smooth=1e-6):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, predictions, targets):
+        """
+        Args:
+            predictions: Raw model outputs (logits) or probabilities [B, C, H, W]
+            targets: One-hot encoded ground truth masks [B, C, H, W]
+        """
+
+        # If predictions are not probabilities, apply softmax across classes
+        if predictions.shape != targets.shape:
+            raise ValueError(f"Shape mismatch: predictions {predictions.shape}, targets {targets.shape}")
+
+        # Convert logits to probabilities (if not already)
+        if not torch.all((predictions >= 0) & (predictions <= 1)):
+            predictions = F.softmax(predictions, dim=1)
+
+        # Flatten each class for batchwise computation
+        predictions = predictions.contiguous().view(predictions.shape[0], predictions.shape[1], -1)
+        targets = targets.contiguous().view(targets.shape[0], targets.shape[1], -1).float()
+
+        # Compute intersection and union per class
+        intersection = (predictions * targets).sum(dim=2)
+        dice_score = (2.0 * intersection + self.smooth) / (
+            predictions.sum(dim=2) + targets.sum(dim=2) + self.smooth
+        )
+
+        # Average across classes and batch
+        dice_loss = 1 - dice_score.mean()
+
+        return dice_loss
+```
+
+---
+
+### ✅ **How to Use It**
+
+If your model outputs **logits** (not probabilities), pass them directly:
+
+```python
+criterion = DiceLoss()
+loss = criterion(pred_logits, one_hot_masks)
+```
+
+If your model already outputs **softmax probabilities**, it will skip the softmax conversion.
+
+---
+
+### 🧠 Notes:
+
+* Input shapes: `[batch_size, num_classes, height, width]`
+* Works perfectly with your **one-hot encoded masks** from the dataset.
+* You can easily extend it to **class-weighted Dice loss** if some classes are rare — just ask and I can show that variant too.
+
+Would you like me to merge **CrossEntropyLoss + DiceLoss** into a **combined hybrid loss** (common in multi-class medical segmentation)?

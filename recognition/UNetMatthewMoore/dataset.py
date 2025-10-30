@@ -124,6 +124,9 @@ class DataSegmenter2D(Dataset):
         self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
         self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
 
+        # self.masks is currently in the form [B, H, W, C] but pytorch expects [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
         print("Images shape: ", self.images.shape)
         print("Masks shape: ", self.masks.shape)
         
