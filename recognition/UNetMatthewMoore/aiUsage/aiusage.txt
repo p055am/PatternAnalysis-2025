@@ -263,3 +263,491 @@ plt.show()
 ---
 
 Would you like me to show you how to adapt this to **3D U-Net** (for full MRI volumes instead of 2D slices)?
+===============================================================================
+Next, I asked more about the file loading, since it was attempting to load all of the data at once
+Prompt:
+For your data loading code, how can you make sure that it isn't loading too much of the data at once? Since the dataset is quite large it cannot all be loaded at once.
+-------------------------------------------------------------------------------
+Response:
+Excellent — that’s **exactly the right question** to ask.
+Your intuition is spot on: NIfTI medical datasets can easily exceed memory limits if you load everything into RAM at once.
+
+Let’s fix that the *right way*, so you can train your U-Net efficiently **without loading all data into memory**.
+
+---
+
+## 🧩 Goal
+
+We’ll modify your setup so that:
+
+* only **a few slices** are loaded into memory at a time;
+* the model still trains efficiently using **mini-batches**;
+* we can still apply normalization and channel conversion as needed.
+
+We’ll achieve this by building a **Python generator** (or `tf.keras.utils.Sequence`), which loads and yields data **on-the-fly** from disk.
+
+---
+
+## ✅ Step 1: Create a generator class
+
+Here’s a `DataGenerator2D` that uses your `load_data_2D` logic but loads files lazily:
+
+```python
+import numpy as np
+import nibabel as nib
+import tensorflow as tf
+from tensorflow.keras.utils import Sequence
+from random import shuffle
+
+class DataGenerator2D(Sequence):
+    def __init__(self, image_files, mask_files, batch_size=8,
+                 normImage=True, categorical=True, dtype=np.float32, shuffle_data=True):
+        self.image_files = image_files
+        self.mask_files = mask_files
+        self.batch_size = batch_size
+        self.normImage = normImage
+        self.categorical = categorical
+        self.dtype = dtype
+        self.shuffle_data = shuffle_data
+        self.on_epoch_end()
+
+    def __len__(self):
+        return int(np.ceil(len(self.image_files) / self.batch_size))
+
+    def on_epoch_end(self):
+        self.indices = np.arange(len(self.image_files))
+        if self.shuffle_data:
+            np.random.shuffle(self.indices)
+
+    def __getitem__(self, idx):
+        batch_indices = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+        X_batch, y_batch = self._load_batch(batch_indices)
+        return X_batch, y_batch
+
+    def _load_batch(self, batch_indices):
+        batch_imgs = []
+        batch_masks = []
+
+        for i in batch_indices:
+            # Load image
+            img = nib.load(self.image_files[i]).get_fdata(caching='unchanged')
+            if img.ndim == 3:
+                img = img[:, :, 0]  # remove extra dim if present
+            img = img.astype(self.dtype)
+            if self.normImage:
+                img = (img - img.mean()) / (img.std() + 1e-8)
+
+            # Load mask
+            mask = nib.load(self.mask_files[i]).get_fdata(caching='unchanged')
+            if mask.ndim == 3:
+                mask = mask[:, :, 0]
+            mask = mask.astype(np.uint8)
+
+            if self.categorical:
+                mask = self._to_channels(mask)
+
+            batch_imgs.append(img)
+            batch_masks.append(mask)
+
+        X = np.stack(batch_imgs, axis=0)
+        y = np.stack(batch_masks, axis=0)
+
+        # Add channel dim if grayscale
+        if X.ndim == 3:
+            X = X[..., np.newaxis]
+
+        return X, y
+
+    def _to_channels(self, arr):
+        """Convert mask to one-hot channel representation"""
+        channels = np.unique(arr)
+        res = np.zeros(arr.shape + (len(channels),), dtype=self.dtype)
+        for c in channels:
+            c = int(c)
+            res[..., c:c+1][arr == c] = 1
+        return res
+```
+
+---
+
+## ✅ Step 2: Use it for training
+
+```python
+from glob import glob
+
+train_img_files = sorted(glob("Data/keras_slices_data/keras_slices_train/*.nii.gz"))
+train_mask_files = sorted(glob("Data/keras_slices_data/keras_slices_seg_train/*.nii.gz"))
+val_img_files = sorted(glob("Data/keras_slices_data/keras_slices_validate/*.nii.gz"))
+val_mask_files = sorted(glob("Data/keras_slices_data/keras_slices_seg_validate/*.nii.gz"))
+
+train_gen = DataGenerator2D(train_img_files, train_mask_files, batch_size=4)
+val_gen = DataGenerator2D(val_img_files, val_mask_files, batch_size=4, shuffle_data=False)
+```
+
+---
+
+## ✅ Step 3: Train with the generator
+
+```python
+model.fit(
+    train_gen,
+    validation_data=val_gen,
+    epochs=50,
+    verbose=1
+)
+```
+
+This way, **Keras calls `__getitem__` on demand**, and you never have the full dataset in memory — only one batch of images and masks at a time.
+
+Even if your dataset has **tens of thousands of NIfTI slices**, this stays efficient and memory-safe.
+
+---
+
+## ⚙️ Notes
+
+* You can easily modify the generator to **load random 2D slices** from full 3D volumes, or to **augment data** (e.g., flips, rotations) before yielding.
+* You can keep using your `load_data_2D()` function for small tests (e.g., visualizing a few samples).
+* For true 3D segmentation (entire NIfTI volumes), you’d switch to `Conv3D` + `DataGenerator3D`.
+
+---
+
+## 🧠 TL;DR
+
+| Approach          | Memory usage                  | Best for                       |
+| ----------------- | ----------------------------- | ------------------------------ |
+| `load_data_2D()`  | Loads all data → high memory  | Small datasets or quick tests  |
+| `DataGenerator2D` | Loads on-the-fly → low memory | Large datasets / real training |
+
+---
+
+Would you like me to extend this generator to include **data augmentation** (e.g., random flips, rotations, or elastic deformations) next? It’s a common step for U-Net training on medical data.
+
+===================================================================================================
+
+I didn't like the file loader it made, so I wrote my own based on it.
+
+Prompt:
+I have this initialiser function. How can I take only a subset of the image and mask files if needed?
+
+def __init__(self, image_path, mask_path, subset_size=None):
+        '''TODO'''
+        # Gets the specific dataset.
+
+        self.images = sorted(glob(image_path))
+        self.masks = sorted(glob(mask_path))
+
+        if (len(self.images) != len(self.masks)):
+            print(f"Warning. The number of images ({len(self.images)}) does not equal the number of masks ({len(self.masks)})")
+
+        # Use subset if specified
+        if subset_size is not None and subset_size < len(self.dataset):
+            # If we're using a subset, we reduce the number of images.
+            self.images = TAKE A SUBSET OF THE IMAGES
+            self.masks = TAKE A SUBSET OF THE MASKS
+            
+            self.subset_size = subset_size
+            print(f"Using subset of {self.subset_size} samples (out of {len(self.images)} total)")
+        else:
+            self.subset_size = len(self.images)
+            print(f"Using all {len(self.images)} samples")
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — you’re 90% of the way there! 👏
+All you need to do is **slice the list of file paths** to take only the desired number of samples.
+
+Here’s the corrected and complete version of your initializer, with the subset logic fixed and a couple of minor safety improvements:
+
+---
+
+```python
+from glob import glob
+
+class DataGenerator2D:
+    def __init__(self, image_path, mask_path, subset_size=None):
+        """
+        Initialize the dataset from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+        """
+        # Get sorted file lists
+        self.images = sorted(glob(image_path))
+        self.masks = sorted(glob(mask_path))
+
+        # Sanity check
+        if len(self.images) != len(self.masks):
+            print(f"⚠️ Warning: Number of images ({len(self.images)}) "
+                  f"!= number of masks ({len(self.masks)})")
+
+        total = min(len(self.images), len(self.masks))
+
+        # --- ✅ SUBSET SELECTION ---
+        if subset_size is not None and subset_size < total:
+            # Take the first N (or random sample if you prefer)
+            self.images = self.images[:subset_size]
+            self.masks = self.masks[:subset_size]
+            self.subset_size = subset_size
+            print(f"✅ Using subset of {self.subset_size} samples (out of {total})")
+        else:
+            self.subset_size = total
+            print(f"✅ Using all {self.subset_size} samples")
+```
+
+---
+
+### 🧩 Optional: random subset (instead of first N)
+
+If you want to randomly sample files each time instead of just taking the first few, you can do:
+
+```python
+import random
+
+if subset_size is not None and subset_size < total:
+    indices = random.sample(range(total), subset_size)
+    self.images = [self.images[i] for i in indices]
+    self.masks = [self.masks[i] for i in indices]
+```
+
+That’s often useful for quick testing when your dataset is large.
+
+---
+
+### ✅ Example usage
+
+```python
+train_gen = DataGenerator2D(
+    image_path="Data/keras_slices_data/keras_slices_train/*.nii.gz",
+    mask_path="Data/keras_slices_data/keras_slices_seg_train/*.nii.gz",
+    subset_size=50   # only use 50 samples for quick debugging
+)
+```
+
+Output:
+
+```
+✅ Using subset of 50 samples (out of 1200)
+```
+
+---
+
+### 🧠 Summary
+
+| Goal                         | Code                                                    |
+| ---------------------------- | ------------------------------------------------------- |
+| Use only a subset of samples | `self.images = self.images[:subset_size]`               |
+| Or take a random subset      | `random.sample(...)`                                    |
+| Prevent index mismatch       | Subset both `images` and `masks` using the same indices |
+| Print summary                | Optional, helps debug file matching                     |
+
+---
+
+Would you like me to show a version where the subset is **split** between training and validation (e.g., 80/20) automatically? That’s often handy when using subset testing.
+
+===================================================================================================
+
+I realised that this would only ever take the first subset_size values, so I told it to add a starting index.
+
+Prompt:
+Change it to take an initial index to start the subset from
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — that’s a clean and useful addition 👌
+
+You want to be able to say, *“Take `subset_size` samples starting from `start_index`”* — so you can, for example, load slices 100–200 instead of 0–100.
+
+Here’s the updated version of your `__init__` function, with a `start_index` parameter added and properly handled:
+
+---
+
+```python
+from glob import glob
+
+class DataGenerator2D:
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
+        """
+        Initialize the dataset from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): Index to start the subset from (default: 0)
+        """
+        # Get sorted file lists
+        self.images = sorted(glob(image_path))
+        self.masks = sorted(glob(mask_path))
+
+        # Sanity check
+        if len(self.images) != len(self.masks):
+            print(f"⚠️ Warning: Number of images ({len(self.images)}) "
+                  f"!= number of masks ({len(self.masks)})")
+
+        total = min(len(self.images), len(self.masks))
+
+        # --- ✅ SUBSET SELECTION WITH START INDEX ---
+        if subset_size is not None:
+            # Compute slice boundaries safely
+            end_index = min(start_index + subset_size, total)
+
+            if start_index >= total:
+                raise ValueError(f"start_index ({start_index}) is beyond dataset size ({total}).")
+
+            self.images = self.images[start_index:end_index]
+            self.masks = self.masks[start_index:end_index]
+            self.subset_size = len(self.images)
+
+            print(f"✅ Using subset from index {start_index} to {end_index-1} "
+                  f"({self.subset_size} samples out of {total})")
+        else:
+            self.subset_size = total
+            print(f"✅ Using all {self.subset_size} samples")
+```
+
+---
+
+### ✅ Example usages
+
+**Case 1 – Use first 50 samples**
+
+```python
+train_gen = DataGenerator2D(
+    image_path="Data/keras_slices_data/keras_slices_train/*.nii.gz",
+    mask_path="Data/keras_slices_data/keras_slices_seg_train/*.nii.gz",
+    subset_size=50
+)
+```
+
+Output:
+
+```
+✅ Using subset from index 0 to 49 (50 samples out of 1200)
+```
+
+**Case 2 – Use 100 samples starting at index 300**
+
+```python
+train_gen = DataGenerator2D(
+    image_path="Data/keras_slices_data/keras_slices_train/*.nii.gz",
+    mask_path="Data/keras_slices_data/keras_slices_seg_train/*.nii.gz",
+    subset_size=100,
+    start_index=300
+)
+```
+
+Output:
+
+```
+✅ Using subset from index 300 to 399 (100 samples out of 1200)
+```
+
+---
+
+### 🧠 Notes
+
+* Both image and mask lists are sliced identically, so their indices stay perfectly aligned.
+* The code safely clamps `end_index` to the dataset size.
+* If you accidentally set `start_index` too high, you’ll get a clear `ValueError`.
+
+---
+
+Would you like me to show how to **split** your dataset into train/validation subsets automatically using this `start_index` logic (e.g., 80/20 split)?
+===================================================================================================
+
+Prompt:
+If I run self.images = self.images[start_index:] and the start index > the last index in self.images, what will happen?
+---------------------------------------------------------------------------------------------------
+
+Response:
+Excellent question — this is subtle but important Python behavior to understand. 👇
+
+Let’s unpack it carefully.
+
+---
+
+## 🧠 What happens when you slice past the end of a list in Python
+
+If you do:
+
+```python
+my_list = [10, 20, 30]
+start_index = 5
+subset = my_list[start_index:]
+```
+
+Python **does not throw an error**.
+Instead, you simply get an **empty list**:
+
+```python
+>>> subset
+[]
+```
+
+That’s because Python slicing is *graceful*:
+
+* Going **past the end** returns an empty list.
+* Going **partially past** just gives you up to the last element.
+* Using negative indices works from the end (e.g., `[-2:]`).
+
+So in your case:
+
+```python
+self.images = self.images[start_index:]
+```
+
+If `start_index >= len(self.images)`,
+→ `self.images` becomes an **empty list** `[]`.
+
+Same goes for `self.masks`.
+
+---
+
+## 🧨 Why that can be a problem
+
+While Python doesn’t crash, your training pipeline *will* — later, when you try to load batches or train your model.
+For example:
+
+* Your `__getitem__` might try to index into an empty list.
+* The model might receive no samples and fail during training.
+
+So it’s **safer to check and raise an error** (or print a clear warning) if this happens.
+
+---
+
+## ✅ Safe version
+
+Here’s the guard you should use:
+
+```python
+if start_index >= len(self.images):
+    raise ValueError(
+        f"start_index ({start_index}) is beyond available dataset size ({len(self.images)})."
+    )
+```
+
+If you want to be more forgiving (e.g., just warn), you could instead do:
+
+```python
+if start_index >= len(self.images):
+    print(f"⚠️ start_index ({start_index}) beyond dataset size ({len(self.images)}). No data will be loaded.")
+    self.images, self.masks = [], []
+```
+
+But in most cases, raising an error is better — because an empty dataset usually means a path or indexing mistake.
+
+---
+
+### ✅ TL;DR
+
+| Case                       | Result                                 |
+| -------------------------- | -------------------------------------- |
+| `start_index < len(list)`  | Returns sublist from that index onward |
+| `start_index == len(list)` | Returns empty list `[]`                |
+| `start_index > len(list)`  | Returns empty list `[]`                |
+| **Best practice**          | Check and raise an error if it happens |
+
+---
+
+Would you like me to show how to make your initializer automatically **wrap around** (e.g., start from the beginning if you overshoot)? That’s sometimes useful for debugging or quick sampling.
+===================================================================================================
