@@ -18,6 +18,7 @@ import torchvision.transforms.functional as TF
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 import os
 from PIL import Image
 from tqdm import tqdm
@@ -51,6 +52,8 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
         # Training loop with progress
         for batch_idx, (images, masks) in enumerate(train_loader):
             images, masks = images.to(device), masks.to(device)
+
+            print(f"Images size: {images.size()}, masks size: {masks.size()}")
 
             optimizer.zero_grad()
             outputs = model(images)
@@ -118,41 +121,42 @@ def denormalize_image(tensor):
     denorm_tensor = tensor * std + mean
     return torch.clamp(denorm_tensor, 0, 1)
 
-def show_examples(dataset, title="Dataset Examples", n=3):
-    """Quick visualization for color demo with binary masks."""
+def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, starting_index=0):
+    """Quick visualization of some Hip MRI data, with labelled masks."""
     fig, axes = plt.subplots(2, n, figsize=(12, 6))
     fig.suptitle(title, fontsize=16, fontweight='bold')
 
+    # Define a color map for masks (one color per class)
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    segment_colors = ['black', 'red', 'green', 'blue', 'yellow', 'magenta'][:num_classes]
+    cmap = ListedColormap(segment_colors) # type: ignore
+
     for i in range(n):
-        image, mask = dataset[i]
+        index = i + starting_index
+        image, mask = dataset[index] # mask is one-hot: [C, H, W]. 
 
         # Denormalize image for visualization
         img_show = denormalize_image(image)
 
         # Show color image (transpose from CHW to HWC for matplotlib)
         img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
-        axes[0, i].imshow(img_display)
-        axes[0, i].set_title(f'Pet Image {i+1} (Color RGB)', fontweight='bold')
+        axes[0, i].imshow(img_display, cmap='gray')
+        axes[0, i].set_title(f'Hip Image {index+1}', fontweight='bold')
         axes[0, i].axis('off')
 
-        # Debug mask values for this sample
-        mask_np = mask.numpy()
-        unique_vals = np.unique(mask_np)
-        pet_count = np.sum(mask_np == 1)
-        bg_count = np.sum(mask_np == 0)
+        # Convert one-hot mask to a single integer mask for plotting
+        # mask: [H,W,C] -> [H,W] with values 0..num_classes-1
+        mask_np = torch.argmax(mask, dim=2).numpy()
 
-        # Show binary mask with better colormap
-        im = axes[1, i].imshow(mask_np, cmap='RdBu', vmin=0, vmax=1)
-        axes[1, i].set_title(f'Mask {i+1} (Pet:{pet_count}, BG:{bg_count})', fontweight='bold')
+        im = axes[1, i].imshow(mask_np, cmap=cmap, vmin=0, vmax=num_classes-1)
+        axes[1, i].set_title(f'Mask {index+1}', fontweight='bold')
         axes[1, i].axis('off')
 
         # Add colorbar for the first image to show the scale
         if i == 0:
-            from matplotlib.colors import ListedColormap
-            colors = ['blue', 'red']  # blue for background (0), red for pet (1)
-            cmap = ListedColormap(colors)
-            im = axes[1, i].imshow(mask_np, cmap=cmap, vmin=0, vmax=1)
-            plt.colorbar(im, ax=axes[1, i], shrink=0.6, ticks=[0, 1], label='0=BG, 1=Pet')
+            cbar = plt.colorbar(im, ax=axes[1, i], shrink=0.6, ticks=range(num_classes))
+            cbar.ax.set_yticklabels(segment_labels)
+            cbar.set_label('Hip MRI Segments', rotation=270, labelpad=15)
 
     plt.tight_layout()
     plt.show()
@@ -227,10 +231,10 @@ transform = transforms.Compose([
 
 # Create datasets with subset for faster training/demo
 # Set subset_size=None to use full dataset, or specify a number for quick demo
-subset_size = 1000  # Use 1000 samples for demo
+subset_size = 100  # Use 100 samples for demo
 # subset_size = None  # Uncomment this to use full dataset
 
-print("🔄 Loading datasets (color RGB, normalized to zero mean & unit std)...")
+print("🔄 Loading datasets (normalized to zero mean & unit std)...")
 # Get file lists
 print("Getting training data")
 train_img_path = dataset.get_image_path_hip_mri('train', 'image')
@@ -253,12 +257,10 @@ print(f"Number of test samples: {len(test_dataset)}")
 # Data loaders
 train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
-print("✅ Data loaders ready! (Color RGB + Binary masks + Normalized)")
-print("✅ Data loaders ready! (Color RGB + Binary masks + 0-1 normalization)")
 
 # Show examples
-show_examples(train_dataset, "🐕 Color Pet Dataset + Binary Masks (Normalized)")
+show_examples(train_dataset, "Initial examples", starting_index=30)
 
-model = modules.SimpleUNet(in_channels=3, out_channels=1, dropout_p=0.2)
+model = modules.SimpleUNet(in_channels=1, out_channels=1, dropout_p=0.2)
 losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
 plot_loss(losses, loss_type='dice')
