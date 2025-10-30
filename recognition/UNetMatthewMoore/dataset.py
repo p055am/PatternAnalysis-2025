@@ -84,10 +84,14 @@ print("Number of evaluation image files: ", len(val_img_files))
 print("Number of evaluation mask files: ", len(val_mask_files))
 
 # Load into memory (can use early_stop=True while testing)
-X_train = load_data_2D(train_img_files, normImage=True)
-y_train = load_data_2D(train_mask_files, categorical=True, dtype=np.uint8)
+x_train = load_data_2D(train_img_files, normImage=True, early_stop=True)
+y_train = load_data_2D(train_mask_files, dtype=np.uint8, early_stop=True)
 
-X_val = load_data_2D(val_img_files, normImage=True)
-y_val = load_data_2D(val_mask_files, categorical=True, dtype=np.uint8)
+x_val = load_data_2D(val_img_files, normImage=True, early_stop=True)
+y_val = load_data_2D(val_mask_files, dtype=np.uint8, early_stop=True)
 
-print(X_train.shape, y_train.shape)
+print("X train shape: ", x_train.shape)
+print("Y train shape: ", y_train.shape)
+
+print("X val shape: ", x_val.shape)
+print("Y val shape: ", y_val.shape)
