@@ -3,7 +3,6 @@ import nibabel as nib
 from tqdm import tqdm
 import os
 from glob import glob
-from torch.utils.data import DataLoader, Dataset
 
 def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
     channels = np.unique(arr)
@@ -70,7 +69,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
     
 
 # Modified from https://colab.research.google.com/drive/1VOsZSyRhyuHLmgoqGriQk01ub4bKNmZ1?usp=sharing#scrollTo=d9842512
-# and from the response given by chatGPT in prompt 2 of aiUsage.txt
+# and from the responses given by chatGPT in datasetAiUsage.txt
 class DataSegmenter2D:
     """TODO."""
 
@@ -132,16 +131,55 @@ class DataSegmenter2D:
         return self.images[idx], self.masks[idx]
 
 
+def get_image_path_hip_mri(dataset, type):
+    """
+    Gets the image path of the Hip MRI data of the type specified by the args.
+    The images require being called in UNetMatthewMoore. cd into there to make them work.
+
+    Args:
+        dataset (str): The segment of data. Should be 'train', 'validate', or 'test'.
+            If invalid, will default to 'train'
+        type (str): The type of data. Should be either 'image' or 'mask'. If invalid, will
+            default to 'image'
+
+    Returns:
+        str: An input to DataSegmenter2D of the specific data.
+    
+    Example:
+        test_img_path = get_image_path_hip_mri('test', 'image')
+        test_mask_path = get_image_path_hip_mri('test', 'mask')
+        data = DataSegmenter2D(test_img_path, test_mask_path)
+    """
+    if (dataset == 'validate'):
+        if (type == 'mask'):
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_validate/*.nii.gz"
+        else:
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_validate/*.nii.gz"
+    elif (dataset == 'test'):
+        if (type == 'mask'):
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_test/*.nii.gz"
+        else:
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_test/*.nii.gz"
+    else:
+        if (type == 'mask'):
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_train/*.nii.gz"
+        else:
+            return "Data/HipMRI_Study_open/keras_slices_data/keras_slices_train/*.nii.gz"
+        
+
+
 # Get file lists
-# These image paths require being called in UNetMatthewMoore
-train_img_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_train/*.nii.gz"
-train_mask_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_train/*.nii.gz"
+print("Getting training data")
+train_img_path = get_image_path_hip_mri('train', 'image')
+train_mask_path = get_image_path_hip_mri('train', 'mask')
+train_data = DataSegmenter2D(train_img_path, train_mask_path, subset_size=2000)
 
-val_img_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_validate/*.nii.gz"
-val_mask_path = "Data/HipMRI_Study_open/keras_slices_data/keras_slices_seg_validate/*.nii.gz"
+print("Getting validation data")
+validate_img_path = get_image_path_hip_mri('validate', 'image')
+validate_mask_path = get_image_path_hip_mri('validate', 'mask')
+validate_data = DataSegmenter2D(validate_img_path, validate_mask_path)
 
-print("Creating training data segmenter")
-dataSegmenter = DataSegmenter2D(train_img_path, train_mask_path, subset_size=200, start_index=200)
-
-print("Creating evaluator data segmenter")
-dataSegmenter = DataSegmenter2D(val_img_path, val_mask_path, subset_size=100, start_index=600)
+print("Getting testing data")
+test_img_path = get_image_path_hip_mri('test', 'image')
+test_mask_path = get_image_path_hip_mri('test', 'mask')
+test_data = DataSegmenter2D(test_img_path, test_mask_path)
