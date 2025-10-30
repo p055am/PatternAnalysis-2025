@@ -1,0 +1,265 @@
+I asked ChatGPT how I would use the completed dataset.py to read the dataset.
+It responded with a full example UNet implementation.
+
+Prompt: 
+Given this file reader file, how would I go about using this to create a  UNet for image classification?
+
+
+import numpy as np
+import nibabel as nib
+from tqdm import tqdm
+
+def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
+    channels = np.unique(arr)
+    res = np.zeros (arr.shape + ( len ( channels ),), dtype = dtype )
+    for c in channels:
+        c = int (c)
+        res[..., c:c+1][arr == c] = 1
+
+    return res
+
+#This needs to be run while the cmd line is cd'd into UNetMatthewMoore
+img = nib.load(".\\Data\\HipMRI_Study_open\\keras_slices_data\\keras_slices_seg_test\\seg_040_week_0_slice_0.nii.gz")
+help(img.get_fdata)
+
+'''
+Load medical image data from names, cases list provided into a list for each.
+
+This function pre-allocates 4D arrays for conv2d to avoid excessive memory usage.
+
+normImage: bool (normalise the image 0.0-1.0)
+early_stop: Stop loading prematurely, leaves arrays mostly empty for quick loading and testing scripts.
+'''
+def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32,
+                  getAffines=False, early_stop=False):
+    affines = []
+
+    # get fixed size
+    num = len(imageNames)
+    img = nib.load(imageNames[0])
+    first_case = img.get_fdata(caching='unchanged')
+    if len(first_case.shape) == 3:
+        first_case = first_case [:, :, 0] # sometimes extra dims, remove
+    if categorical:
+        first_case = to_channels(first_case, dtype=dtype)
+        rows, cols, channels = first_case.shape
+        images = np.zeros((num, rows, cols, channels), dtype=dtype )
+    else:
+        rows, cols = first_case.shape
+        images = np.zeros((num, rows, cols), dtype=dtype)
+
+    for i, inName in enumerate(tqdm(imageNames)):
+        niftiImage = nib.load(inName)
+        inImage = niftiImage.get_fdata(caching='unchanged') # read disk only
+        affine = niftiImage.affine
+        if len(inImage.shape) == 3:
+            inImage = inImage[:, :, 0] # sometimes extra dims in HipMRI_study data
+
+        inImage = inImage.astype(dtype)
+        if normImage:
+            #~ inImage = inImage / np.linalg.norm ( inImage )
+            #~ inImage = 255. * inImage / inImage . max ()
+            inImage = (inImage - inImage.mean()) / inImage.std()
+        if categorical:
+            inImage = to_channels(inImage, dtype=dtype)
+            images[i, :, :, :] = inImage
+        else :
+            images[i, :, :] = inImage
+
+        affines.append(affine)
+        if i > 20 and early_stop:
+            break
+
+    if getAffines:
+        return images, affines
+    else:
+        return images
+
+
+
+
+here is my training data file structure
+Data
+    keras_slices_data
+        keras_slices_seg_test
+            various .nii.gz files
+        keras_slices_seg_train
+            various .nii.gz files
+        keras_slices_seg_validate
+            various .nii.gz files
+        keras_slices_test
+            various .nii.gz files
+        keras_slices_train
+            various .nii.gz files
+        keras_slices_validate
+            various .nii.gz files
+    semantic_labels_only
+        various .nii.gz files
+    semantic_mrs
+        various .nii.gz files
+-------------------------------------------------------------------------------
+Response:
+Great — you’ve already got the hard part: a data loader that can convert your `.nii.gz` (NIfTI) medical images into usable NumPy arrays. From here, we can use that loader to feed a **U-Net** model for **image segmentation** (note: not “classification” — classification outputs one label per image, while U-Net predicts a label per pixel/voxel).
+
+Let’s walk through how to integrate your loader into a full **U-Net segmentation training pipeline** in Keras/TensorFlow.
+
+---
+
+## 🧠 Step 1. Clarify the task
+
+Your file structure suggests you have **pairs of inputs and segmentation masks**:
+
+* `keras_slices_train` → MRI input images
+* `keras_slices_seg_train` → segmentation masks (labels)
+
+Each mask is a `.nii.gz` with the same shape as its corresponding input image.
+
+So your task = **train a U-Net to segment medical images**.
+
+---
+
+## 🧩 Step 2. Use your loader to prepare NumPy arrays
+
+We’ll use your `load_data_2D()` for both **inputs** and **labels**.
+
+```python
+import os
+from glob import glob
+
+# Get file lists
+train_img_files = sorted(glob("Data/keras_slices_data/keras_slices_train/*.nii.gz"))
+train_mask_files = sorted(glob("Data/keras_slices_data/keras_slices_seg_train/*.nii.gz"))
+
+val_img_files = sorted(glob("Data/keras_slices_data/keras_slices_validate/*.nii.gz"))
+val_mask_files = sorted(glob("Data/keras_slices_data/keras_slices_seg_validate/*.nii.gz"))
+
+# Load into memory (can use early_stop=True while testing)
+X_train = load_data_2D(train_img_files, normImage=True)
+y_train = load_data_2D(train_mask_files, categorical=True, dtype=np.uint8)
+
+X_val = load_data_2D(val_img_files, normImage=True)
+y_val = load_data_2D(val_mask_files, categorical=True, dtype=np.uint8)
+
+print(X_train.shape, y_train.shape)
+```
+
+> 🔹 If `y_train` has shape `(N, H, W, C)`, that’s perfect — `C` is the number of segmentation classes (channels created by `to_channels()`).
+
+---
+
+## 🧱 Step 3. Build a U-Net model in Keras
+
+Here’s a simple but solid 2D U-Net implementation compatible with your data:
+
+```python
+import tensorflow as tf
+from tensorflow.keras import layers, Model
+
+def unet_model(input_shape, num_classes):
+    inputs = layers.Input(shape=input_shape)
+
+    # Encoder
+    c1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)
+    c1 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(c1)
+    p1 = layers.MaxPooling2D((2, 2))(c1)
+
+    c2 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(p1)
+    c2 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(c2)
+    p2 = layers.MaxPooling2D((2, 2))(c2)
+
+    c3 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(p2)
+    c3 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(c3)
+    p3 = layers.MaxPooling2D((2, 2))(c3)
+
+    # Bottleneck
+    b = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(p3)
+    b = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(b)
+
+    # Decoder
+    u3 = layers.UpSampling2D((2, 2))(b)
+    u3 = layers.concatenate([u3, c3])
+    c4 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(u3)
+    c4 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(c4)
+
+    u2 = layers.UpSampling2D((2, 2))(c4)
+    u2 = layers.concatenate([u2, c2])
+    c5 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(u2)
+    c5 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(c5)
+
+    u1 = layers.UpSampling2D((2, 2))(c5)
+    u1 = layers.concatenate([u1, c1])
+    c6 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(u1)
+    c6 = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(c6)
+
+    # Output
+    outputs = layers.Conv2D(num_classes, (1, 1), activation='softmax')(c6)
+
+    model = Model(inputs, outputs)
+    return model
+```
+
+---
+
+## ⚙️ Step 4. Compile and train
+
+```python
+num_classes = y_train.shape[-1]  # number of segmentation labels
+input_shape = X_train.shape[1:]  # (H, W) or (H, W, 1)
+
+model = unet_model(input_shape, num_classes)
+
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+model.fit(
+    X_train[..., np.newaxis] if X_train.ndim == 3 else X_train,
+    y_train,
+    validation_data=(X_val[..., np.newaxis] if X_val.ndim == 3 else X_val, y_val),
+    epochs=50,
+    batch_size=8
+)
+```
+
+> 🔸 If your images are grayscale 2D slices (most likely), you might need to expand the channel dimension using `[..., np.newaxis]`.
+
+---
+
+## 🧪 Step 5. Visualize predictions
+
+```python
+import matplotlib.pyplot as plt
+
+idx = 0
+pred = model.predict(X_val[idx:idx+1])
+pred_mask = np.argmax(pred[0], axis=-1)
+
+plt.subplot(1,3,1); plt.title('Input'); plt.imshow(X_val[idx], cmap='gray')
+plt.subplot(1,3,2); plt.title('True Mask'); plt.imshow(np.argmax(y_val[idx], axis=-1))
+plt.subplot(1,3,3); plt.title('Predicted Mask'); plt.imshow(pred_mask)
+plt.show()
+```
+
+---
+
+## 🚀 Optional improvements
+
+* Use **Dice loss** instead of categorical crossentropy (better for imbalanced segmentation):
+
+  ```python
+  def dice_loss(y_true, y_pred, smooth=1e-6):
+      y_true_f = tf.reshape(y_true, [-1])
+      y_pred_f = tf.reshape(y_pred, [-1])
+      intersection = tf.reduce_sum(y_true_f * y_pred_f)
+      return 1 - (2. * intersection + smooth) / (tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) + smooth)
+  ```
+* Add **data augmentation** (e.g., flips, rotations).
+* Use **3D U-Net** if you want to segment full volumetric `.nii` data instead of slices.
+
+---
+
+Would you like me to show you how to adapt this to **3D U-Net** (for full MRI volumes instead of 2D slices)?
