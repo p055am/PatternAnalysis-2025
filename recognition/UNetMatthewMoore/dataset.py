@@ -6,18 +6,21 @@ from glob import glob
 import torch
 from torch.utils.data import Dataset
 
-def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
-    channels = np.unique(arr)
-    res = np.zeros (arr.shape + ( len ( channels ),), dtype = dtype )
-    for c in channels:
-        c = int (c)
-        res[..., c:c+1][arr == c] = 1
+def to_channels(arr: np.ndarray, dtype=np.uint8, num_classes=None) -> np.ndarray:
+    if num_classes is None:
+        channels = np.unique(arr)
+        num_classes = len(channels)
+    else:
+        channels = range(num_classes)
 
+    res = np.zeros(arr.shape + (num_classes,), dtype=dtype)
+    for c in np.unique(arr):
+        c_as_int = int(c)
+        res[..., c_as_int] = (arr == c_as_int).astype(dtype)
     return res
 
-
 def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32,
-                  getAffines=False, early_stop=False):
+                  getAffines=False, early_stop=False, num_classes = None):
     '''
     Load medical image data from names, cases list provided into a list for each.
 
@@ -35,7 +38,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
     if len(first_case.shape) == 3:
         first_case = first_case [:, :, 0] # sometimes extra dims, remove
     if categorical:
-        first_case = to_channels(first_case, dtype=dtype)
+        first_case = to_channels(first_case, dtype=dtype, num_classes=num_classes)
         rows, cols, channels = first_case.shape
         images = np.zeros((num, rows, cols, channels), dtype=dtype )
     else:
@@ -55,7 +58,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
             #~ inImage = 255. * inImage / inImage . max ()
             inImage = (inImage - inImage.mean()) / inImage.std()
         if categorical:
-            inImage = to_channels(inImage, dtype=dtype)
+            inImage = to_channels(inImage, dtype=dtype, num_classes=num_classes) # There are 6 classes in the dataset
             images[i, :, :, :] = inImage
         else :
             images[i, :, :] = inImage
@@ -119,7 +122,7 @@ class DataSegmenter2D(Dataset):
         
         # Loads the subset into memory as pytorch tensors
         self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
-        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
 
         print("Images shape: ", self.images.shape)
         print("Masks shape: ", self.masks.shape)
@@ -130,7 +133,15 @@ class DataSegmenter2D(Dataset):
 
     def __getitem__(self, idx):
         # Get image and mask
-        return self.images[idx], self.masks[idx]
+        image, mask = self.images[idx], self.masks[idx]
+        
+        # Add channel dimension if missing
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # -> (1, H, W)
+
+        # The masks are one-hot encoded, so should be the right shape.
+        
+        return image, mask
 
 
 def get_image_path_hip_mri(dataset, type):

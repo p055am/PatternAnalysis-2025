@@ -751,3 +751,1780 @@ But in most cases, raising an error is better — because an empty dataset usual
 
 Would you like me to show how to make your initializer automatically **wrap around** (e.g., start from the beginning if you overshoot)? That’s sometimes useful for debugging or quick sampling.
 ===================================================================================================
+Prompt:
+I have modified my dataSegmenter2D to extend the pytorch Dataset.
+Should I put the tensors onto the GPU, or should that be done later?
+
+class DataSegmenter2D(Dataset):
+    """TODO."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
+        """
+        Initialize the dataset, or a subset of the dataset, from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): The starting index of the images to load. Images before this index are not loaded.
+        """
+
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+
+        if (len(self.image_paths) != len(self.mask_paths)):
+            print(f"Warning. The number of images ({len(self.image_paths)}) does not equal the number of masks ({len(self.mask_paths)})")
+
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+
+        # Remove elements before the starting index
+        if (self.dataset_size <= start_index):
+            print(f"Warning: start index ({start_index}) >= the size of the data ({self.dataset_size}). No data will be stored.")
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+
+        # Update the size after removing elements
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Use subset if specified
+        if subset_size is not None and subset_size < self.dataset_size:
+            # If we're using a subset, we reduce the number of images.
+            
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            
+            # Print first to use the old size.
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size} total)")
+            self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        else:
+            print(f"Using all {self.dataset_size} samples")
+        
+        # Loads the subset into memory as pytorch tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8))
+
+        print("Images shape: ", self.images.shape)
+        print("Masks shape: ", self.masks.shape)
+
+
+    def __len__(self):
+        return self.dataset_size
+
+    def __getitem__(self, idx):
+        # Get image and mask
+        return self.images[idx], self.masks[idx]
+---------------------------------------------------------------------------------------------------
+Response:
+That’s an excellent, important question — and you’re thinking about it at exactly the right time. 👏
+
+Here’s the short answer first:
+
+> ❌ **Don’t move tensors to the GPU inside your `Dataset` class.**
+> ✅ **Move them to the GPU later — inside the training loop, after they’re loaded by the DataLoader.**
+
+Now let’s go through why.
+
+---
+
+## 🧠 Why you *don’t* put tensors on GPU in the Dataset
+
+### 1. **Datasets should stay device-agnostic**
+
+A PyTorch `Dataset` should only be responsible for:
+
+* Knowing how to *load* and *preprocess* data.
+* Returning CPU tensors when indexed (e.g. `__getitem__`).
+
+The dataset class should **not care about hardware** (CPU vs GPU).
+That separation keeps your code clean and flexible — you can reuse the same dataset for:
+
+* CPU training
+* GPU training
+* multi-GPU setups
+* evaluation on CPU later, etc.
+
+---
+
+### 2. **The DataLoader runs on the CPU**
+
+When you wrap your dataset with a DataLoader:
+
+```python
+train_loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4)
+```
+
+The DataLoader’s workers load data *in parallel on the CPU*.
+If you try to push tensors to the GPU inside the `Dataset`, that happens **inside each worker process**, and you’ll get:
+
+* GPU memory fragmentation
+* serialization issues
+* slower loading
+* and sometimes outright crashes (`CUDA error: invalid device ordinal`).
+
+So: keep the DataLoader’s work on CPU, and move batches to GPU later.
+
+---
+
+### 3. **Move to GPU right before the model uses it**
+
+You move tensors to the GPU *after* they come out of the DataLoader:
+
+```python
+for images, masks in train_loader:
+    images = images.to(device)
+    masks = masks.to(device)
+    outputs = model(images)
+    loss = criterion(outputs, masks)
+```
+
+That way:
+
+* You load and preprocess efficiently on CPU.
+* You only transfer small batches (e.g. 8 images) to GPU each time.
+* Memory management stays clean and efficient.
+
+---
+
+### ✅ What to do instead
+
+Keep your `Dataset` exactly like this:
+
+```python
+return self.images[idx], self.masks[idx]
+```
+
+Then, in your **training loop**:
+
+```python
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+for images, masks in train_loader:
+    images = images.to(device, non_blocking=True)
+    masks = masks.to(device, non_blocking=True)
+
+    optimizer.zero_grad()
+    outputs = model(images)
+    loss = criterion(outputs, masks)
+    loss.backward()
+    optimizer.step()
+```
+
+The key line is `.to(device)` here, not in the dataset.
+
+---
+
+### ⚡ Optional optimization: `pin_memory=True`
+
+When you create your DataLoader, add:
+
+```python
+DataLoader(dataset, batch_size=8, shuffle=True, pin_memory=True, num_workers=4)
+```
+
+That “pins” CPU memory, which makes transfers to the GPU asynchronous and faster.
+
+---
+
+### 🔍 Quick summary table
+
+| Step                                    | CPU or GPU? | Why                       |
+| --------------------------------------- | ----------- | ------------------------- |
+| Load files (.nii.gz)                    | CPU         | I/O bound                 |
+| Convert to numpy → torch tensor         | CPU         | preprocessing step        |
+| `Dataset.__getitem__()` returns tensors | CPU         | device-agnostic           |
+| `DataLoader` batches data               | CPU         | efficient multi-threading |
+| `.to(device)` in training loop          | GPU         | compute step only         |
+
+---
+
+### 🧠 Bonus tip
+
+Your current dataset *loads everything into memory* at once:
+
+```python
+self.images = torch.from_numpy(load_data_2D(...))
+```
+
+That’s okay for small datasets, but for large MRI volumes, it might be too big.
+If you hit memory issues later, you can switch to **lazy loading**:
+
+* Don’t load all images at `__init__`.
+* Just store file paths.
+* Load and convert each `.nii.gz` file inside `__getitem__`.
+
+I can show you exactly how to modify your code to do that efficiently if you’d like.
+
+---
+
+Would you like me to show how to modify your `Dataset` to **load lazily (on-demand)** instead of loading everything upfront? That’s the standard pattern for large 3D/2D medical datasets.
+===================================================================================================
+Prompt:
+Should I be using categorical in my data loader function?
+---------------------------------------------------------------------------------------------------
+Response:
+That’s a **very good** question — and one that depends on *what kind of segmentation problem* you’re training your U-Net for.
+
+Let’s go through it clearly and precisely 👇
+
+---
+
+## 🧠 What `categorical` means in your `load_data_2D()` function
+
+Your function has this flag:
+
+```python
+def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32, ...):
+```
+
+If you pass `categorical=True`, it runs this:
+
+```python
+if categorical:
+    first_case = to_channels(first_case, dtype=dtype)
+```
+
+and later for each image:
+
+```python
+inImage = to_channels(inImage, dtype=dtype)
+```
+
+That function `to_channels()` one-hot encodes the segmentation mask:
+
+```python
+def to_channels(arr, dtype=np.uint8):
+    channels = np.unique(arr)
+    res = np.zeros(arr.shape + (len(channels),), dtype=dtype)
+    for c in channels:
+        res[..., c:c+1][arr == c] = 1
+    return res
+```
+
+---
+
+## 🧩 What that means practically
+
+Let’s say your segmentation mask looks like this:
+
+```
+[[0, 0, 1],
+ [1, 2, 2]]
+```
+
+* `0` = background
+* `1` = organ A
+* `2` = organ B
+
+Then:
+
+```python
+to_channels(mask)
+```
+
+creates a tensor with shape `(H, W, 3)` — where each channel corresponds to one class:
+
+```
+Channel 0 → [1, 1, 0]
+Channel 1 → [0, 0, 1]
+Channel 2 → [0, 0, 0]
+```
+
+That’s called **one-hot encoding**.
+
+---
+
+## 🧠 So — should you use `categorical=True`?
+
+### ✅ Use `categorical=True` if:
+
+* You are doing **multi-class segmentation** (e.g. background, organ A, organ B, etc.),
+* You want to train with a **multi-channel output** U-Net (e.g. `out_channels = num_classes`),
+* And you’ll use a **softmax activation** with a loss like `nn.CrossEntropyLoss()` or `nn.BCEWithLogitsLoss()` (for multi-label).
+
+Example:
+
+```python
+model = SimpleUNet(in_channels=1, out_channels=3)
+loss = nn.CrossEntropyLoss()
+```
+
+Each pixel predicts one of 3 classes.
+
+---
+
+### 🚫 Don’t use `categorical=True` if:
+
+* You are doing **binary segmentation** (foreground vs background),
+* Your masks are single-channel (0 = background, 1 = region of interest),
+* And your model outputs `out_channels = 1` with a **sigmoid** activation.
+
+Example (your current case):
+
+```python
+model = SimpleUNet(in_channels=1, out_channels=1)
+loss = nn.BCELoss()  # or BCEWithLogitsLoss if no sigmoid in model
+```
+
+Then your masks should stay shape `(H, W)` or `(1, H, W)`, *not* one-hot.
+
+---
+
+### 🧮 Quick reference table
+
+| Problem type             | Mask example        | `categorical` | Model output channels | Activation | Loss          |
+| ------------------------ | ------------------- | ------------- | --------------------- | ---------- | ------------- |
+| Binary segmentation      | 0, 1                | ❌ False       | 1                     | Sigmoid    | BCE / Dice    |
+| Multi-class segmentation | 0, 1, 2, 3          | ✅ True        | num_classes           | Softmax    | CrossEntropy  |
+| Multi-label segmentation | overlapping classes | ✅ True        | num_classes           | Sigmoid    | BCEWithLogits |
+
+---
+
+### 🧠 For your current `SimpleUNet`
+
+Your model ends with:
+
+```python
+self.sigmoid = nn.Sigmoid()
+```
+
+and
+
+```python
+self.dec1 = nn.Conv2d(32, out_channels, 1)
+```
+
+That’s a **binary segmentation setup** (1 output channel, sigmoid).
+So you should set:
+
+```python
+categorical=False
+```
+
+in your data loader function for both images and masks.
+
+---
+
+### ✅ Summary
+
+| Question                                            | Answer                |
+| --------------------------------------------------- | --------------------- |
+| Are you segmenting one object vs background?        | → `categorical=False` |
+| Are you segmenting multiple organs/tissues/classes? | → `categorical=True`  |
+| Your current U-Net uses `sigmoid` output            | → `categorical=False` |
+
+---
+
+Would you like me to show how to **extend your UNet + dataset** for multi-class segmentation (e.g. 3 output channels with softmax)? It’s a small change but really helpful to know.
+===================================================================================================
+Prompt:
+When I run this:
+model = modules.SimpleUNet(in_channels=12, out_channels=1, dropout_p=0.2)
+losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
+plot_loss(losses, loss_type='dice')
+
+I am getting the error:
+ValueError: expected 4D input (got 3D input)
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — this is one of those errors that seems cryptic at first, but it’s actually pointing to something very concrete and fixable. 👇
+
+---
+
+## ⚠️ The error
+
+```
+ValueError: expected 4D input (got 3D input)
+```
+
+This is a **PyTorch shape error** that usually comes from a convolution layer:
+
+```python
+nn.Conv2d(...)
+```
+
+which expects its input to have **4 dimensions**:
+`(batch_size, channels, height, width)` — i.e. **NCHW** format.
+
+---
+
+## 🧠 What’s happening in your case
+
+You created:
+
+```python
+model = SimpleUNet(in_channels=12, out_channels=1, dropout_p=0.2)
+```
+
+So the model expects **12 input channels per image**, with shape like:
+
+```
+(batch_size, 12, H, W)
+```
+
+But the error says it got a **3D input** — likely shaped like:
+
+```
+(12, H, W)   or   (H, W, 12)
+```
+
+That means your dataset (or DataLoader) is returning *per-sample tensors without a batch dimension*, or in the wrong axis order.
+
+---
+
+## 🔍 Step-by-step diagnosis
+
+### 1. Check one sample from your dataset:
+
+```python
+img, mask = train_dataset[0]
+print(img.shape, mask.shape)
+```
+
+You’ll probably see something like:
+
+```
+torch.Size([H, W, 12])
+```
+
+or
+
+```
+torch.Size([12, H, W])
+```
+
+If you see `(H, W, 12)`, the channels are **last**, but PyTorch expects them **first**.
+
+---
+
+## 🧩 The correct shape for U-Net input
+
+U-Net in PyTorch expects input as:
+
+```
+(batch_size, channels, height, width)
+```
+
+So even for a single image, before batching, it should be `(channels, H, W)`.
+
+Then, when DataLoader batches N samples, it becomes `(N, channels, H, W)` — 4D, exactly what Conv2D wants.
+
+---
+
+## ✅ Fix options
+
+### 🧩 Option 1: Fix inside your dataset
+
+If your dataset currently loads images as `(H, W, C)`, fix it in `__getitem__`:
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]
+    mask = self.masks[idx]
+
+    # Move channels to the first dimension if needed
+    if image.ndim == 3 and image.shape[-1] < image.shape[0]:  # (H, W, C)
+        image = image.permute(2, 0, 1)
+
+    if mask.ndim == 3 and mask.shape[-1] < mask.shape[0]:
+        mask = mask.permute(2, 0, 1)
+
+    return image, mask
+```
+
+Now each image is `(C, H, W)` → after batching → `(B, C, H, W)` ✅
+
+---
+
+### 🧩 Option 2: Check your data loader
+
+Sometimes the problem happens if you feed a *single sample* directly into the model instead of a batch:
+
+```python
+# ❌ This will cause 3D input error
+image, mask = dataset[0]
+output = model(image)
+
+# ✅ Fix: add batch dimension
+output = model(image.unsqueeze(0))
+```
+
+Because `unsqueeze(0)` turns shape `(C, H, W)` → `(1, C, H, W)`.
+
+But since you’re using a DataLoader, this usually isn’t the cause — unless you accidentally passed the dataset directly to `train()` instead of a DataLoader.
+
+---
+
+### 🧩 Option 3: Sanity check your DataLoader
+
+```python
+for batch in train_loader:
+    images, masks = batch
+    print(images.shape)
+    break
+```
+
+You should see:
+
+```
+torch.Size([batch_size, 12, H, W])
+```
+
+If you see `(batch_size, H, W, 12)`, you need to permute channels in your dataset.
+
+---
+
+## 🧠 Why this happens with `.nii.gz` medical data
+
+Libraries like **nibabel** load volumes as `(H, W, C)` or `(X, Y, Z)` — channel or slice last.
+PyTorch and most CNNs expect `(C, H, W)` or `(C, D, H, W)` (for 3D).
+
+So almost always you’ll need a `np.moveaxis` or `.permute(2, 0, 1)` when converting.
+
+---
+
+## ✅ TL;DR fix
+
+Modify your dataset’s `__getitem__` to return:
+
+```python
+image = torch.from_numpy(image).float().permute(2, 0, 1)
+mask = torch.from_numpy(mask).float().unsqueeze(0)
+```
+
+Then your model will receive 4D input `(B, C, H, W)` and the error disappears.
+
+---
+
+Would you like me to show the **exact corrected version** of your `DataSegmenter2D` that guarantees all shapes (including masks) are in the correct PyTorch U-Net format `(N, C, H, W)`?
+===================================================================================================
+Prompt:
+This is part of my training loop. When I run the print statement, I get Images size: torch.Size([12, 256, 128]), masks size: torch.Size([12, 256, 128])
+
+def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every=1):
+    model.to(device)
+    criterion = DiceLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    losses = []
+
+    print(" Starting training with Batch Norm, LeakyReLU, and Sigmoid activation...")
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+
+        # Training loop with progress
+        for batch_idx, (images, masks) in enumerate(train_loader):
+            images, masks = images.to(device), masks.to(device)
+
+            print(f"Images size: {images.size()}, masks size: {masks.size()}")
+
+            optimizer.zero_grad()
+            outputs = model(images)
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — that print statement tells us **exactly what’s wrong** 👇
+
+---
+
+## 🧩 What you’re seeing
+
+```
+Images size: torch.Size([12, 256, 128])
+masks size:  torch.Size([12, 256, 128])
+```
+
+That’s a **3D tensor**, not 4D.
+PyTorch’s `Conv2d` expects a **4D** input in the form:
+
+```
+(batch_size, channels, height, width)
+```
+
+But your tensors are currently shaped:
+
+```
+(channels, height, width)
+```
+
+— that’s **missing the batch dimension**.
+
+---
+
+## ⚙️ Why this happens
+
+It means your `train_loader` is likely not batching samples.
+This can happen if you accidentally passed **the entire dataset tensor** to the loader like this:
+
+```python
+train_loader = DataLoader(train_dataset, batch_size=None)
+```
+
+or if your dataset returns **already-stacked tensors** instead of individual samples.
+
+Looking at your `DataSegmenter2D`, you’re loading *all* the data into memory in the constructor:
+
+```python
+self.images = torch.from_numpy(load_data_2D(...))
+```
+
+That means `self.images` is a single tensor containing **all samples** stacked together.
+
+So when PyTorch calls `__getitem__(i)`, it returns `self.images[i]` — that’s **one image tensor**, shape `(12, 256, 128)`, not a batch.
+
+When you then put that into the `DataLoader`, the loader just gives you back those per-sample tensors — so **no batch dimension**.
+
+---
+
+## ✅ How to fix it
+
+### Option 1 — Use a proper DataLoader with batching
+
+Wrap your dataset in a DataLoader with a batch size:
+
+```python
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+```
+
+Then inside `__getitem__`, make sure you return **a single sample** (not all of them):
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]
+    mask = self.masks[idx]
+    return image, mask
+```
+
+Now, `images` in your training loop will be shaped:
+
+```
+torch.Size([4, 12, 256, 128])
+```
+
+✅ Correct for Conv2D.
+
+---
+
+### Option 2 — If you want to pre-batch everything manually
+
+If you truly want to keep your dataset preloaded as one tensor (not ideal for large data), then you can just add a batch dimension before feeding to the model:
+
+```python
+outputs = model(images.unsqueeze(0))
+```
+
+That changes shape `(12, 256, 128)` → `(1, 12, 256, 128)`.
+
+But this will make your training extremely slow — it will train one image at a time.
+
+---
+
+### 🧠 Recommended fix summary
+
+✅ **Best practice for segmentation training:**
+
+* Dataset: loads individual samples `(C, H, W)`
+* DataLoader: batches them → `(B, C, H, W)`
+* Model input: `(B, C, H, W)`
+
+So your combination should look like:
+
+```python
+train_dataset = DataSegmenter2D(train_image_path, train_mask_path)
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+
+for batch_idx, (images, masks) in enumerate(train_loader):
+    print(images.shape)  # torch.Size([4, 12, 256, 128])
+```
+
+---
+
+Would you like me to show an updated version of your `DataSegmenter2D` that’s structured properly for PyTorch DataLoader use (so you can safely batch, shuffle, and stream large datasets)?
+
+===================================================================================================
+Prompt:
+This is how the data loader is created:
+
+test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
+
+train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — that’s the correct way to construct a PyTorch `DataLoader`.
+So if you’re **still getting 3D tensors (`[12, 256, 128]`)** instead of 4D (`[batch, channels, height, width]`), it means your `DataSegmenter2D` is returning **entire batches as single samples** instead of one `(C, H, W)` sample per index.
+
+Let’s unpack exactly why and how to fix it 👇
+
+---
+
+## 🧠 What’s happening
+
+Inside your dataset:
+
+```python
+self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+```
+
+If `load_data_2D` returns a tensor shaped like
+`(num_slices, height, width)` or `(num_slices, channels, height, width)`,
+then `self.images[idx]` gives you **a full 3D tensor**, not a 2D image.
+
+So when you use:
+
+```python
+train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
+```
+
+PyTorch stacks 12 of those →
+`(batch_size=12, height, width)`
+→ 3D, not 4D, because there’s **no channel dimension**.
+
+---
+
+## ✅ How to fix it
+
+You just need to ensure that **each sample returned from `__getitem__` has a channel dimension**, even if it’s just one channel.
+
+Modify your dataset like this:
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]
+    mask = self.masks[idx]
+
+    # Add channel dimension if missing
+    if image.ndim == 2:
+        image = image.unsqueeze(0)  # -> (1, H, W)
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+
+    return image, mask
+```
+
+Now the `DataLoader` will batch correctly:
+
+```
+images.shape = (batch_size, channels, height, width)
+```
+
+For example:
+
+```
+torch.Size([12, 1, 256, 128])
+```
+
+or
+
+```
+torch.Size([12, 12, 256, 128])   # if you have 12 input channels
+```
+
+---
+
+## 🔍 Verify it
+
+You can add a quick check:
+
+```python
+for images, masks in train_loader:
+    print(images.shape)
+    break
+```
+
+You should see something like:
+
+```
+torch.Size([12, 12, 256, 128])
+```
+
+---
+
+## ⚙️ TL;DR
+
+| Problem                                 | Cause                                      | Fix                                                |
+| --------------------------------------- | ------------------------------------------ | -------------------------------------------------- |
+| Model expects 4D input                  | Dataset returns 3D `(C, H, W)` or `(H, W)` | Add `.unsqueeze(0)` to make `(1, H, W)` per sample |
+| Loader batching doesn’t add channel dim | Channel dim missing from dataset           | Add inside `__getitem__`                           |
+
+---
+
+Would you like to show me the `load_data_2D` function? Then I can confirm exactly what shape it’s returning and ensure it’s consistent for both images and masks.
+===================================================================================================
+Prompt:
+Okay, I changed my model code to be 
+model = modules.SimpleUNet(in_channels=1, out_channels=1, dropout_p=0.2)
+losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
+plot_loss(losses, loss_type='dice')
+
+since the images are greyscale, I figure there is only 1 channel. However, I am now getting the error:
+
+Traceback (most recent call last):
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 265, in <module>
+    losses = train(model, train_loader, test_dataset, epochs=1000, lr=0.001, visualize_every=50)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 58, in train
+    outputs = model(images)
+              ^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\modules.py", line 71, in forward
+    e1 = self.enc1(x) # 64x64
+         ^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\container.py", line 250, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\conv.py", line 554, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\torch\nn\modules\conv.py", line 549, in _conv_forward
+    return F.conv2d(
+           ^^^^^^^^^
+RuntimeError: Given groups=1, weight of size [32, 1, 3, 3], expected input[1, 12, 256, 128] to have 1 channels, but got 12 channels instead
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — this is actually a really **helpful error**, because it tells us **exactly what’s happening**:
+
+> `expected input[1, 12, 256, 128] to have 1 channels, but got 12 channels instead`
+
+---
+
+### 🔍 What this means
+
+Your model’s first convolution layer expects:
+
+```
+in_channels = 1
+```
+
+…but the actual data you’re feeding in has **12 channels** per sample:
+
+```
+images.shape = [batch, channels=12, height=256, width=128]
+```
+
+So even though you thought your input was grayscale, the dataset is giving 12 feature maps per sample.
+
+---
+
+### 🧠 Why you’re getting 12 channels
+
+In your preprocessing (`load_data_2D`), you’re probably calling:
+
+```python
+to_channels(...)
+```
+
+or loading data that already has shape `(H, W, 12)` — maybe because your MRI volumes were split into **12 slices or modalities**.
+When converted to tensors, PyTorch interprets that last dimension as *channels*, giving you 12.
+
+You can confirm this quickly:
+
+```python
+print("Image shape:", self.images.shape)
+```
+
+in your dataset after loading.
+
+If it prints something like:
+
+```
+torch.Size([N, 256, 128, 12])
+```
+
+then yes — those 12 are channels.
+
+---
+
+### ✅ You have two valid options:
+
+#### **Option 1: Keep 12 channels**
+
+If these 12 channels are meaningful (e.g., 12 MRI slices or modalities per sample),
+then your model should use:
+
+```python
+model = SimpleUNet(in_channels=12, out_channels=1)
+```
+
+This matches the actual data shape and will fix the error.
+
+#### **Option 2: Reduce to 1 channel**
+
+If you truly only want grayscale (e.g., use a single slice), you can modify your dataset’s `__getitem__`:
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]
+    mask = self.masks[idx]
+
+    # If image has 12 channels, take one
+    if image.ndim == 3 and image.shape[0] == 12:
+        image = image[0:1, :, :]  # just take the first channel
+
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+
+    return image, mask
+```
+
+This will give:
+
+```
+image.shape = [1, H, W]
+mask.shape = [1, H, W]
+```
+
+and then your current model definition (`in_channels=1`) will work fine.
+
+---
+
+### 💡 Which one should you choose?
+
+* If those 12 channels are **different slices** of the same 3D MRI volume → keep them (use `in_channels=12`).
+* If those 12 channels are **one-hot encoded class labels** or just redundant → use 1 channel.
+
+---
+
+Would you like me to take a look at your `load_data_2D` output shape (or the data sample shape) to confirm which case you’re in?
+That’ll tell us whether you should keep 12 or reduce to 1.
+===================================================================================================
+Prompt:
+The only point where the number 12 is used is here:
+
+train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
+
+When I run this at the end of my DataSegmented2D init function:
+
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8))
+
+        print("Images shape: ", self.images.shape)
+        print("Masks shape: ", self.masks.shape)
+
+I get:
+Images shape:  torch.Size([100, 256, 128])
+Masks shape:  torch.Size([100, 256, 128])
+
+The 100 is because there are 100 files being loaded.
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — that detail is **exactly what we needed** 👍
+
+So let’s walk through this carefully.
+
+---
+
+### 🧠 What your shapes mean
+
+You said:
+
+```
+Images shape: torch.Size([100, 256, 128])
+Masks shape: torch.Size([100, 256, 128])
+```
+
+That means:
+
+* You have **100 samples total**
+* Each sample is **a 2D image** of shape `(256, 128)`
+* There is **no channel dimension yet**
+
+So each individual sample (before batching) looks like this:
+
+```
+(H, W)
+```
+
+But you need it to look like this for PyTorch’s `Conv2d`:
+
+```
+(C, H, W)
+```
+
+and when you batch it, you’ll get:
+
+```
+(batch, C, H, W)
+```
+
+---
+
+### 💥 Why you’re seeing `input[1, 12, 256, 128]`
+
+Because your **batch size is 12**, and since the dataset returns `(H, W)` per sample,
+PyTorch **thinks your batch dimension is channels**, not batch.
+
+Let’s make that explicit:
+
+If your dataset returns `torch.Size([256, 128])` per sample,
+and your DataLoader has `batch_size=12`,
+PyTorch stacks them → `torch.Size([12, 256, 128])`.
+
+Your model then reads that as:
+
+```
+batch = 1, channels = 12, height = 256, width = 128
+```
+
+Hence the error:
+
+```
+expected 1 channel, got 12
+```
+
+---
+
+### ✅ Fix
+
+You need to **add a channel dimension** inside your dataset’s `__getitem__` method.
+
+Modify it like this:
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]
+    mask = self.masks[idx]
+
+    # Add channel dimension (1, H, W)
+    if image.ndim == 2:
+        image = image.unsqueeze(0)
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+
+    return image, mask
+```
+
+Now each sample returned from the dataset will have shape:
+
+```
+image.shape = [1, 256, 128]
+mask.shape  = [1, 256, 128]
+```
+
+and after batching with `batch_size=12`, you’ll get:
+
+```
+images.shape = [12, 1, 256, 128]
+masks.shape  = [12, 1, 256, 128]
+```
+
+✅ Perfect for a `UNet(in_channels=1, out_channels=1)`.
+
+---
+
+### 🧩 Quick check
+
+You can confirm by printing one batch before training:
+
+```python
+for images, masks in train_loader:
+    print("Batch images:", images.shape)
+    print("Batch masks:", masks.shape)
+    break
+```
+
+You should see:
+
+```
+Batch images: torch.Size([12, 1, 256, 128])
+Batch masks: torch.Size([12, 1, 256, 128])
+```
+
+Then your model call:
+
+```python
+outputs = model(images)
+```
+
+will run without any channel errors.
+
+---
+
+✅ **Summary:**
+
+| Problem                                           | Root cause                                              | Fix                                         |
+| ------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------- |
+| Model expects `[B, C, H, W]`, got `[1, 12, H, W]` | Missing channel dim, so batch dim mistaken for channels | Add `unsqueeze(0)` in dataset `__getitem__` |
+
+---
+
+Would you like me to show you how to normalize or augment those `(1, H, W)` samples properly using `torchvision.transforms` next? It’s usually the next step right after this fix.
+===================================================================================================
+Prompt:
+Doing that does seem to work for my UNet, however I'm having an issue with my show_examples function. When I run 
+show_examples(train_dataset, "Color Pet Dataset + Binary Masks (Normalized)")
+I get Traceback (most recent call last):
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 262, in <module>
+    show_examples(train_dataset, "Color Pet Dataset + Binary Masks (Normalized)")
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 147, in show_examples
+    im = axes[1, i].imshow(mask_np, cmap='RdBu', vmin=0, vmax=1)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\matplotlib\__init__.py", line 1524, in inner
+    return func(
+           ^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\matplotlib\axes\_axes.py", line 5982, in imshow
+    im.set_data(X)
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\matplotlib\image.py", line 685, in set_data
+    self._A = self._normalize_image_array(A)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\matth\miniconda3\envs\comp3710\Lib\site-packages\matplotlib\image.py", line 653, in _normalize_image_array
+    raise TypeError(f"Invalid shape {A.shape} for image data")
+TypeError: Invalid shape (1, 256, 128) for image data
+Remember, train_dataset is a DataSegmenter2D.
+
+
+
+def show_examples(dataset, title="Dataset Examples", n=3):
+    """Quick visualization for color demo with binary masks."""
+    fig, axes = plt.subplots(2, n, figsize=(12, 6))
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+
+    for i in range(n):
+        image, mask = dataset[i]
+
+        # Denormalize image for visualization
+        img_show = denormalize_image(image)
+
+        # Show color image (transpose from CHW to HWC for matplotlib)
+        img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
+        axes[0, i].imshow(img_display)
+        axes[0, i].set_title(f'Pet Image {i+1} (Color RGB)', fontweight='bold')
+        axes[0, i].axis('off')
+
+        # Debug mask values for this sample
+        mask_np = mask.numpy()
+        unique_vals = np.unique(mask_np)
+        pet_count = np.sum(mask_np == 1)
+        bg_count = np.sum(mask_np == 0)
+
+        # Show binary mask with better colormap
+        im = axes[1, i].imshow(mask_np, cmap='RdBu', vmin=0, vmax=1)
+        axes[1, i].set_title(f'Mask {i+1} (Pet:{pet_count}, BG:{bg_count})', fontweight='bold')
+        axes[1, i].axis('off')
+
+        # Add colorbar for the first image to show the scale
+        if i == 0:
+            from matplotlib.colors import ListedColormap
+            colors = ['blue', 'red']  # blue for background (0), red for pet (1)
+            cmap = ListedColormap(colors)
+            im = axes[1, i].imshow(mask_np, cmap=cmap, vmin=0, vmax=1)
+            plt.colorbar(im, ax=axes[1, i], shrink=0.6, ticks=[0, 1], label='0=BG, 1=Pet')
+
+    plt.tight_layout()
+    plt.show()
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — that error tells us exactly what’s going on 👍
+
+Your **mask tensor** has shape `(1, 256, 128)`, but `matplotlib.imshow()` only accepts:
+
+* `(H, W)` → grayscale, or
+* `(H, W, 3)` or `(H, W, 4)` → RGB(A).
+
+So the **extra leading channel dimension (1)** is the problem.
+
+---
+
+### ✅ Fix
+
+In your `show_examples()` function, just squeeze out that redundant dimension before plotting:
+
+```python
+mask_np = mask.squeeze().numpy()
+```
+
+Replace this line:
+
+```python
+mask_np = mask.numpy()
+```
+
+with the squeezed version.
+
+---
+
+### Full corrected block
+
+```python
+# Debug mask values for this sample
+mask_np = mask.squeeze().numpy()   # <- remove channel dimension if present
+unique_vals = np.unique(mask_np)
+pet_count = np.sum(mask_np == 1)
+bg_count = np.sum(mask_np == 0)
+
+# Show binary mask with better colormap
+im = axes[1, i].imshow(mask_np, cmap='RdBu', vmin=0, vmax=1)
+axes[1, i].set_title(f'Mask {i+1} (Pet:{pet_count}, BG:{bg_count})', fontweight='bold')
+axes[1, i].axis('off')
+```
+
+---
+
+### 💡 Why it happens
+
+Your dataset now returns:
+
+* `image`: `(C, H, W)` → 12 channels (for your UNet input)
+* `mask`: `(1, H, W)` → single channel for segmentation
+
+That’s perfect for PyTorch training.
+But for visualization, `imshow` expects 2D grayscale or 3D RGB, so we just remove that singleton dimension.
+
+---
+
+Would you like me to tweak `show_examples()` so it automatically handles both grayscale `(1,H,W)` **and** color `(3,H,W)` masks without needing manual edits later?
+===================================================================================================
+Prompt:
+My data set has 6 segments. I want these segments to be one-hot encoded. How would I do this with my training set?
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — now we’re talking **multi-class segmentation**. Since you have 6 segments, your masks need to be **one-hot encoded** so the network can predict each class separately. Let me walk you through it carefully.
+
+---
+
+## 1️⃣ Why one-hot encoding is needed
+
+Your current masks have shape:
+
+```
+mask: [1, H, W]  # single channel, values 0,1,2,...,5
+```
+
+For 6 segments, you want:
+
+```
+mask_one_hot: [6, H, W]
+```
+
+Where each channel corresponds to a class:
+
+* Channel 0 → pixels where mask = 0
+* Channel 1 → pixels where mask = 1
+* …
+* Channel 5 → pixels where mask = 5
+
+This allows you to use **`nn.CrossEntropyLoss`** (which expects **raw logits per class**) or **BCEWithLogitsLoss** if doing multi-label.
+
+---
+
+## 2️⃣ Update your data loader
+
+Inside `DataSegmenter2D`, you can add a function to convert masks to one-hot:
+
+```python
+def mask_to_one_hot(mask, num_classes=6):
+    """
+    Convert a mask of shape (H, W) with integer labels 0..num_classes-1
+    to one-hot encoding of shape (num_classes, H, W)
+    """
+    # mask assumed to be a torch tensor
+    one_hot = torch.zeros((num_classes, *mask.shape), dtype=torch.float32)
+    for c in range(num_classes):
+        one_hot[c] = (mask == c).float()
+    return one_hot
+```
+
+Then in `__getitem__`:
+
+```python
+def __getitem__(self, idx):
+    image = self.images[idx]  # shape: (C, H, W)
+    mask = self.masks[idx]    # shape: (1, H, W)
+
+    # remove channel if it exists
+    mask = mask.squeeze(0)    # now (H, W)
+
+    # one-hot encode
+    mask = mask_to_one_hot(mask, num_classes=6)
+
+    return image, mask
+```
+
+---
+
+## 3️⃣ Adjust your model
+
+For 6 segments:
+
+```python
+model = SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
+```
+
+* `in_channels=1` → grayscale image
+* `out_channels=6` → predict 6 class logits per pixel
+
+Remove the **sigmoid** from the final layer if using `CrossEntropyLoss` (it expects raw logits).
+
+---
+
+## 4️⃣ Adjust your loss
+
+Use **`nn.CrossEntropyLoss`**, which combines `softmax + NLLLoss` in one:
+
+```python
+criterion = nn.CrossEntropyLoss()
+```
+
+⚠️ Important: `CrossEntropyLoss` expects:
+
+```
+pred: [batch, num_classes, H, W]  # raw logits
+target: [batch, H, W]             # integer class labels (0..num_classes-1)
+```
+
+> That means you **should not pass one-hot masks** directly to CrossEntropyLoss. Only the integer mask is needed.
+
+So if you want one-hot masks for visualization, that’s fine — for training with CrossEntropyLoss, just pass **the original integer mask**.
+
+---
+
+### ✅ TL;DR
+
+1. **For model input:**
+   Images shape `(C, H, W)` (C=1 for grayscale).
+
+2. **For model output:**
+   U-Net `out_channels = num_classes = 6`.
+
+3. **For training:**
+
+   * `criterion = nn.CrossEntropyLoss()`
+   * Input to model: `(B, 1, H, W)`
+   * Target masks: `(B, H, W)` integer labels 0..5
+
+4. **For visualization or optional processing:**
+   Convert masks to one-hot `(6, H, W)` if needed.
+
+---
+
+I can also rewrite your **DataSegmenter2D `__getitem__`** to automatically handle **6-class masks and optional one-hot conversion for visualization**, which works cleanly with PyTorch.
+
+Do you want me to do that?
+===================================================================================================
+Prompt:
+Should only the masks be one-hot encoded?
+---------------------------------------------------------------------------------------------------
+Response:
+Exactly — **only the masks should be one-hot encoded**, not the input images. ✅
+
+Here’s why:
+
+---
+
+### 1️⃣ Input images
+
+* Your images are the actual **data** the network sees (grayscale or RGB).
+* Each pixel has **intensity values**, usually normalized (e.g., 0–1 or standard normalized).
+* **No need to one-hot encode images**, because channels already represent actual features.
+* Example shapes for input:
+
+  * Grayscale: `(1, H, W)`
+  * RGB: `(3, H, W)`
+
+---
+
+### 2️⃣ Masks / labels
+
+* The mask tells the network which **class each pixel belongs to**.
+
+* For multi-class segmentation, you can use either:
+
+  1. **Integer masks** (0, 1, 2, …) → works directly with `nn.CrossEntropyLoss`.
+
+     * Shape: `(H, W)` per sample
+  2. **One-hot masks** → shape `(num_classes, H, W)` → useful if you:
+
+     * Visualize segmentation per class
+     * Use a **loss function like BCEWithLogits** for per-class outputs
+
+* For standard multi-class segmentation in PyTorch, the most common workflow is:
+
+  * **Model outputs:** `[batch, num_classes, H, W]`
+  * **Target masks:** `[batch, H, W]` integers (not one-hot)
+  * Loss: `nn.CrossEntropyLoss()`
+
+> Only convert masks to one-hot if you need it for visualization, certain custom losses, or multi-label tasks.
+
+---
+
+### ✅ Summary Table
+
+| Tensor      | Shape for UNet | One-hot? | Notes                                                                                 |
+| ----------- | -------------- | -------- | ------------------------------------------------------------------------------------- |
+| Input image | `(C, H, W)`    | ❌ No     | Grayscale/RGB/normalized intensity                                                    |
+| Target mask | `(H, W)`       | Optional | Integer labels for CrossEntropyLoss; one-hot only for visualization or special losses |
+
+---
+
+If you want, I can rewrite your `DataSegmenter2D` so it **returns integer masks for training** but can **also return one-hot masks for visualization**, keeping everything consistent with PyTorch expectations.
+
+Do you want me to do that?
+===================================================================================================
+Prompt:
+This is my current code:
+
+
+def to_channels(arr: np.ndarray, dtype = np.uint8) -> np.ndarray:
+    channels = np.unique(arr)
+    res = np.zeros (arr.shape + ( len ( channels ),), dtype = dtype )
+    for c in channels:
+        c = int (c)
+        res[..., c:c+1][arr == c] = 1
+
+    return res
+
+
+def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32,
+                  getAffines=False, early_stop=False):
+    '''
+    Load medical image data from names, cases list provided into a list for each.
+
+    This function pre-allocates 4D arrays for conv2d to avoid excessive memory usage.
+
+    normImage: bool (normalise the image 0.0-1.0)
+    early_stop: Stop loading prematurely, leaves arrays mostly empty for quick loading and testing scripts.
+    '''
+    affines = []
+
+    # get fixed size
+    num = len(imageNames)
+    img = nib.load(imageNames[0])
+    first_case = img.get_fdata(caching='unchanged')
+    if len(first_case.shape) == 3:
+        first_case = first_case [:, :, 0] # sometimes extra dims, remove
+    if categorical:
+        first_case = to_channels(first_case, dtype=dtype)
+        rows, cols, channels = first_case.shape
+        images = np.zeros((num, rows, cols, channels), dtype=dtype )
+    else:
+        rows, cols = first_case.shape
+        images = np.zeros((num, rows, cols), dtype=dtype)
+
+    for i, inName in enumerate(tqdm(imageNames)):
+        niftiImage = nib.load(inName)
+        inImage = niftiImage.get_fdata(caching='unchanged') # read disk only
+        affine = niftiImage.affine
+        if len(inImage.shape) == 3:
+            inImage = inImage[:, :, 0] # sometimes extra dims in HipMRI_study data
+
+        inImage = inImage.astype(dtype)
+        if normImage:
+            #~ inImage = inImage / np.linalg.norm ( inImage )
+            #~ inImage = 255. * inImage / inImage . max ()
+            inImage = (inImage - inImage.mean()) / inImage.std()
+        if categorical:
+            inImage = to_channels(inImage, dtype=dtype)
+            images[i, :, :, :] = inImage
+        else :
+            images[i, :, :] = inImage
+
+        affines.append(affine)
+        if i > 20 and early_stop:
+            break
+
+    if getAffines:
+        return images, affines
+    else:
+        return images
+    
+
+# Modified from https://colab.research.google.com/drive/1VOsZSyRhyuHLmgoqGriQk01ub4bKNmZ1?usp=sharing#scrollTo=d9842512
+# and from the responses given by chatGPT in datasetAiUsage.txt
+class DataSegmenter2D(Dataset):
+    """TODO."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
+        """
+        Initialize the dataset, or a subset of the dataset, from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): The starting index of the images to load. Images before this index are not loaded.
+        """
+
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+
+        if (len(self.image_paths) != len(self.mask_paths)):
+            print(f"Warning. The number of images ({len(self.image_paths)}) does not equal the number of masks ({len(self.mask_paths)})")
+
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+
+        # Remove elements before the starting index
+        if (self.dataset_size <= start_index):
+            print(f"Warning: start index ({start_index}) >= the size of the data ({self.dataset_size}). No data will be stored.")
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+
+        # Update the size after removing elements
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Use subset if specified
+        if subset_size is not None and subset_size < self.dataset_size:
+            # If we're using a subset, we reduce the number of images.
+            
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            
+            # Print first to use the old size.
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size} total)")
+            self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        else:
+            print(f"Using all {self.dataset_size} samples")
+        
+        # Loads the subset into memory as pytorch tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8, categorical=True))
+
+        print("Images shape: ", self.images.shape)
+        print("Masks shape: ", self.masks.shape)
+        
+
+    def __len__(self):
+        return self.dataset_size
+
+    def __getitem__(self, idx):
+        # Get image and mask
+        image, mask = self.images[idx], self.masks[idx]
+        
+        # Add channel dimension if missing
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # -> (1, H, W)
+
+        # The masks are one-hot encoded, so should be the right shape.
+        
+        return image, mask
+
+
+When I try to run it, I am getting
+Traceback (most recent call last):
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 240, in <module>
+    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\dataset.py", line 122, in __init__
+    self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8, categorical=True))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\dataset.py", line 59, in load_data_2D
+    images[i, :, :, :] = inImage
+    ~~~~~~^^^^^^^^^^^^
+ValueError: could not broadcast input array from shape (256,128,5) into shape (256,128,4)
+---------------------------------------------------------------------------------------------------
+Response:
+Ah — now the error is crystal clear:
+
+```
+ValueError: could not broadcast input array from shape (256,128,5) into shape (256,128,4)
+```
+
+---
+
+### 🔍 What this means
+
+Your `load_data_2D` function with `categorical=True` calls `to_channels(inImage)`:
+
+```python
+if categorical:
+    inImage = to_channels(inImage, dtype=dtype)
+    images[i, :, :, :] = inImage
+```
+
+* `to_channels` creates **one-hot channels for the unique values in `inImage`**.
+* If your first image has **4 unique values** (e.g., 0,1,2,3), `first_case.shape[-1] = 4`, so the preallocated array `images` has shape `(num, H, W, 4)`.
+* But the next image happens to have **5 unique values** (0–4) → shape `(H, W, 5)`.
+
+Now it **cannot fit into the preallocated array of 4 channels**, causing the broadcast error.
+
+---
+
+### ✅ How to fix
+
+You need to **predefine the number of classes**, instead of relying on `np.unique()` in each image.
+
+1. Add a parameter `num_classes` to `load_data_2D`:
+
+```python
+def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float32,
+                  getAffines=False, early_stop=False, num_classes=None):
+```
+
+2. Change `to_channels` to accept `num_classes`:
+
+```python
+def to_channels(arr: np.ndarray, dtype=np.uint8, num_classes=None) -> np.ndarray:
+    if num_classes is None:
+        channels = np.unique(arr)
+        num_classes = len(channels)
+    else:
+        channels = range(num_classes)
+
+    res = np.zeros(arr.shape + (num_classes,), dtype=dtype)
+    for c in np.unique(arr):
+        res[..., c] = (arr == c).astype(dtype)
+    return res
+```
+
+3. Preallocate using `num_classes`:
+
+```python
+if categorical:
+    assert num_classes is not None, "num_classes must be set for categorical data"
+    first_case = to_channels(first_case, dtype=dtype, num_classes=num_classes)
+    rows, cols, channels = first_case.shape
+    images = np.zeros((num, rows, cols, num_classes), dtype=dtype)
+```
+
+4. In `__init__` of your dataset, specify the number of classes (6 in your case):
+
+```python
+self.masks = torch.from_numpy(load_data_2D(
+    self.mask_paths, dtype=np.uint8, categorical=True, num_classes=6
+))
+```
+
+---
+
+### 💡 Summary
+
+* The **broadcast error** happens because `to_channels` dynamically sets the number of channels per image, but the preallocated array was fixed to the first image.
+* Fix: **always specify `num_classes`**, so all masks are one-hot encoded with the same number of channels.
+
+---
+
+If you want, I can rewrite your `DataSegmenter2D` and `load_data_2D` together with **proper one-hot masks for 6 classes**, ready for multi-class UNet training. This will eliminate this broadcasting problem entirely.
+
+Do you want me to do that?
+===================================================================================================
+Prompt:
+Traceback (most recent call last):
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\train.py", line 240, in <module>
+    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\dataset.py", line 124, in __init__
+    self.masks = torch.from_numpy(load_data_2D(self.mask_paths, dtype=np.uint8, categorical=True, num_classes=6))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\dataset.py", line 40, in load_data_2D
+    first_case = to_channels(first_case, dtype=dtype, num_classes=num_classes)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\matth\Documents\COMP3710\PatternAnalysis-2025\recognition\UNetMatthewMoore\dataset.py", line 18, in to_channels
+    res[..., c] = (arr == c).astype(dtype)
+    ~~~^^^^^^^^
+IndexError: only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) and integer or boolean arrays are valid indices
+---------------------------------------------------------------------------------------------------
+Response:
+Ah — now the new error makes sense:
+
+```
+IndexError: only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) and integer or boolean arrays are valid indices
+```
+
+This comes from **`res[..., c] = (arr == c).astype(dtype)`** in your modified `to_channels` function.
+
+---
+
+### 🔍 Why it happens
+
+```python
+channels = range(num_classes)  # e.g., 0,1,2,3,4,5
+res = np.zeros(arr.shape + (num_classes,), dtype=dtype)
+for c in np.unique(arr):
+    res[..., c] = (arr == c).astype(dtype)
+```
+
+Notice the mismatch:
+
+* `arr` is a **2D array** `(H, W)`
+* `res` is `(H, W, num_classes)`
+* `c` comes from `np.unique(arr)` → maybe `[0,1,2,3,4,5]`, fine
+* But the problem arises if `arr` has **values outside 0..num_classes-1**.
+* Another subtlety: `res[..., c]` **expects `c` to be an integer**, which `np.unique()` returns as `np.int64`, so usually fine — but sometimes the dtype or shape of `arr` causes numpy to interpret `arr == c` as float or weird type.
+
+Also, if your `arr` is 3D `(H, W, 1)` instead of `(H, W)`, using `res[..., c]` will fail because the last dimension is size 1 — not enough to assign 6 channels.
+
+---
+
+### ✅ Safe `to_channels` implementation
+
+Here’s a robust version for **fixed `num_classes`**:
+
+```python
+def to_channels(arr: np.ndarray, num_classes: int, dtype=np.uint8) -> np.ndarray:
+    """
+    Converts a 2D array of integer labels to one-hot encoded array.
+    arr: 2D array of shape (H, W)
+    num_classes: total number of classes (e.g., 6)
+    Returns: array of shape (H, W, num_classes)
+    """
+    arr = arr.astype(np.int64)  # ensure integer indexing
+    H, W = arr.shape
+    res = np.zeros((H, W, num_classes), dtype=dtype)
+    for c in range(num_classes):
+        res[..., c] = (arr == c).astype(dtype)
+    return res
+```
+
+---
+
+### ⚡ Key points
+
+1. **Ensure `arr` is 2D** `(H, W)` before calling `to_channels`:
+
+```python
+if inImage.ndim == 3:
+    inImage = inImage[:, :, 0]
+```
+
+2. **Use fixed `num_classes`** instead of `np.unique()` for the last dimension.
+3. **Cast `arr` to integer** (`np.int64`) to prevent indexing errors.
+
+---
+
+### Example usage in your dataset
+
+```python
+self.masks = torch.from_numpy(load_data_2D(
+    self.mask_paths,
+    dtype=np.uint8,
+    categorical=True,
+    num_classes=6
+))
+```
+
+* This will produce shape: `(num_samples, H, W, 6)`
+* Then in `__getitem__`, convert to `(6, H, W)` for PyTorch:
+
+```python
+mask = self.masks[idx].permute(2, 0, 1)  # CHW
+```
+
+---
+
+If you want, I can rewrite your **`load_data_2D` and `DataSegmenter2D`** fully for **6-class segmentation**, ensuring:
+
+* Images `(C,H,W)`
+* Masks `(6,H,W)`
+* Compatible with UNet
+* No broadcasting/indexing errors
+
+Do you want me to do that?
