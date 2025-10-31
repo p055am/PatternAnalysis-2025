@@ -271,7 +271,7 @@ def main():
 
     # 1 input channel because grayscale, 6 output channels because 6 segments
     model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-    model.load_state_dict(torch.load('models/epoch_100_save.pth', map_location=device)) # comment out if we don't want to load a prev example.
+    #model.load_state_dict(torch.load('models/epoch_100_save.pth', map_location=device)) # Allows for loading a previous example for more training.
     losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=1, save_every=10)
     plot_loss(losses, loss_type='dice')
 
