@@ -3633,3 +3633,999 @@ loss = checkpoint['loss']
 
 Would you like me to show you exactly where to insert the save/load logic in your current `train()` and testing code so it’s automatic?
 ===================================================================================================
+Prompt:
+Write an evaluation function, that loads the model and evaluates the dice score for each of the 6 segment types
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect 👏 — that’s a great next step.
+You already have a **multi-class Dice loss**, so we can reuse the same logic to compute a **per-class Dice score** for evaluation.
+
+Here’s a clean, standalone function you can add (e.g. below your training code):
+
+---
+
+### 🧠 Evaluate Dice Score per Class
+
+```python
+def evaluate_model(model_path, dataset, num_classes=6):
+    """
+    Loads a saved model and evaluates Dice scores for each class on the given dataset.
+
+    Args:
+        model_path (str): Path to the saved model .pth file
+        dataset (torch.utils.data.Dataset): Dataset to evaluate (e.g., test set)
+        num_classes (int): Number of segmentation classes (default 6)
+    """
+    import torch
+    import torch.nn.functional as F
+    from tqdm import tqdm
+    import numpy as np
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🧩 Using device: {device}")
+
+    # --- Load model ---
+    model = modules.SimpleUNet(in_channels=1, out_channels=num_classes, dropout_p=0.2)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    # --- Initialize Dice tracking ---
+    dice_scores = np.zeros(num_classes)
+    eps = 1e-6  # avoid divide-by-zero
+
+    # --- Iterate through dataset ---
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+
+    print("🔍 Evaluating model on dataset...")
+    with torch.no_grad():
+        for images, masks in tqdm(loader):
+            images, masks = images.to(device), masks.to(device)
+
+            preds = model(images)  # [B, C, H, W]
+            preds = F.softmax(preds, dim=1)
+            
+            # Compute Dice per class
+            preds_flat = preds.view(preds.shape[0], preds.shape[1], -1)
+            masks_flat = masks.view(masks.shape[0], masks.shape[1], -1)
+
+            intersection = (preds_flat * masks_flat).sum(dim=2)
+            union = preds_flat.sum(dim=2) + masks_flat.sum(dim=2)
+
+            dice = (2.0 * intersection + eps) / (union + eps)
+            dice_scores += dice.mean(dim=0).cpu().numpy()  # average across batch
+
+    # Average across dataset
+    dice_scores /= len(loader)
+
+    # --- Report results ---
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    print("\n📊 Dice Scores per Class:")
+    for label, score in zip(segment_labels, dice_scores):
+        print(f"  {label:<12}: {score:.4f}")
+
+    print(f"\n🎯 Mean Dice Score: {dice_scores.mean():.4f}")
+    return dice_scores
+```
+
+---
+
+### ✅ Example usage
+
+After training and saving:
+
+```python
+torch.save(model.state_dict(), "unet_hip_mri.pth")
+```
+
+You can run:
+
+```python
+dice_scores = evaluate_model("unet_hip_mri.pth", test_dataset, num_classes=6)
+```
+
+---
+
+### 🔍 What this does
+
+* Loads your trained model weights.
+* Runs inference over the entire dataset.
+* Computes **per-class Dice scores** between the **softmax predictions** and **one-hot encoded masks**.
+* Prints and returns a breakdown like:
+
+  ```
+  📊 Dice Scores per Class:
+    Empty       : 0.9821
+    Body Outline: 0.8745
+    Bone        : 0.7234
+    Bladder     : 0.6152
+    Rectum      : 0.4923
+    Prostate    : 0.4389
+
+  🎯 Mean Dice Score: 0.6877
+  ```
+
+---
+
+Would you like me to modify this to also **visualize the prediction quality** per class (like overlaying predicted vs. true masks)?
+===================================================================================================
+Prompt:
+A source has this transforms function:
+
+# Transforms for color demo with normalization to zero mean and unit std
+transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.ToTensor(),  # This converts to 0-1 range automatically for RGB
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],  # ImageNet RGB means
+        std=[0.229, 0.224, 0.225]    # ImageNet RGB standard deviations
+    )
+])
+
+This uses the mean and std dev of its data set. How would I determine my dataset's mean and std dev?
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent question 👍 — and one that really matters for MRI or medical images, where normalization is often critical.
+
+The `mean` and `std` values used in `transforms.Normalize()` are dataset-specific statistics — the ImageNet ones you saw are only correct for RGB photos, **not** for grayscale MRI data.
+
+Here’s exactly how you can compute them for your dataset 👇
+
+---
+
+### 🧮 Option 1: Compute Mean and Std for a Dataset of Images
+
+If your dataset is a list of image file paths or a `torch.utils.data.Dataset`, you can do:
+
+```python
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from tqdm import tqdm
+
+def compute_mean_std(dataset):
+    """
+    Compute mean and std for a dataset of images (grayscale or RGB).
+    Works with datasets that return images as PIL or tensors.
+    """
+    loader = DataLoader(dataset, batch_size=16, num_workers=2, shuffle=False)
+
+    mean = 0.0
+    std = 0.0
+    nb_samples = 0
+
+    for images, _ in tqdm(loader):
+        # images shape: [B, C, H, W]
+        batch_samples = images.size(0)
+        images = images.view(batch_samples, images.size(1), -1)  # flatten each image
+
+        mean += images.mean(2).sum(0)
+        std += images.std(2).sum(0)
+        nb_samples += batch_samples
+
+    mean /= nb_samples
+    std /= nb_samples
+
+    return mean, std
+```
+
+Then run:
+
+```python
+mean, std = compute_mean_std(train_dataset)
+print("Dataset mean:", mean)
+print("Dataset std:", std)
+```
+
+Output example (for grayscale MRI):
+
+```
+Dataset mean: tensor([0.4821])
+Dataset std: tensor([0.2234])
+```
+
+---
+
+### 🧠 Option 2: If your dataset is a 3D or 4D numpy array
+
+If you already have everything loaded into memory (e.g., your MRI data arrays), you can compute it directly with NumPy:
+
+```python
+import numpy as np
+
+def compute_mean_std_numpy(images):
+    """
+    images: numpy array [N, H, W] or [N, H, W, C]
+    """
+    mean = np.mean(images)
+    std = np.std(images)
+    return mean, std
+
+mean, std = compute_mean_std_numpy(all_images_array)
+print("Mean:", mean, "Std:", std)
+```
+
+---
+
+### 🩻 In your case (Hip MRI)
+
+Since your data are likely **grayscale MRI slices**, you’ll usually end up with something like:
+
+```python
+transforms.Normalize(mean=[0.5], std=[0.25])
+```
+
+But computing it from your dataset (as above) is always the best practice.
+
+---
+
+Would you like me to show how to **apply this computed mean/std automatically** inside your custom `Dataset` class (so it normalizes each image on the fly)?
+===================================================================================================
+Prompt:
+Is there any way I can modify  train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True) to perform a transformation to augment the data
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent — yes! 🎯
+You **can absolutely** apply transformations (including data augmentation) to your training data — but you don’t do it *inside* the `DataLoader`.
+Instead, you do it inside the **dataset** that the `DataLoader` wraps.
+
+Let’s break this down 👇
+
+---
+
+### 💡 Key Idea
+
+The `DataLoader` just handles batching, shuffling, and parallel loading.
+The **`Dataset`** is responsible for:
+
+* loading the actual image/mask pairs
+* applying transformations (augmentation, normalization, resizing, etc.)
+
+So you apply your augmentations in your dataset class like this:
+
+---
+
+### 🧱 Example: Add Augmentations to Your Custom Dataset
+
+Let’s say your dataset class looks like this:
+
+```python
+from torch.utils.data import Dataset
+from torchvision import transforms
+import torch
+
+class HipMRIDataset(Dataset):
+    def __init__(self, image_paths, mask_paths, augment=False):
+        self.image_paths = image_paths
+        self.mask_paths = mask_paths
+        self.augment = augment
+
+        # Base transforms (convert to tensor)
+        self.base_transform = transforms.ToTensor()
+
+        # Optional augmentations
+        if augment:
+            self.transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(15),
+                transforms.RandomResizedCrop(size=(256, 128), scale=(0.9, 1.1)),
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((256, 128))
+            ])
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image = load_image(self.image_paths[idx])  # however you load your images
+        mask = load_mask(self.mask_paths[idx])
+
+        # Apply transforms (must apply same geometric ones to both image & mask!)
+        if self.augment:
+            # Example using torchvision functional transforms for consistent mask handling
+            import torchvision.transforms.functional as F
+            angle = transforms.RandomRotation.get_params([-15, 15])
+            image = F.rotate(image, angle)
+            mask = F.rotate(mask, angle)
+
+            if torch.rand(1) < 0.5:
+                image = F.hflip(image)
+                mask = F.hflip(mask)
+
+        image = self.base_transform(image)
+        mask = torch.from_numpy(mask).long()
+
+        return image, mask
+```
+
+Then you’d create your loaders like this:
+
+```python
+train_dataset = HipMRIDataset(train_images, train_masks, augment=True)
+test_dataset = HipMRIDataset(test_images, test_masks, augment=False)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+```
+
+---
+
+### 🧠 Why augment in the Dataset and not the DataLoader?
+
+Because:
+
+* Each sample is independently augmented when it’s **loaded**
+* The `DataLoader` can use multiple workers (`num_workers > 0`) to augment samples in parallel
+* Augmentation integrates naturally into your training loop with no changes to the rest of your code
+
+---
+
+### 🪄 Bonus: Advanced Augmentation
+
+If you want richer medical augmentations, consider using:
+
+* **Albumentations** → powerful and fast for image/mask pairs
+* **MONAI.transforms** → medical imaging–specific augmentations
+
+Would you like me to show you an example using **Albumentations** for your MRI segmentation dataset (with proper mask-safe transformations)?
+===================================================================================================
+Prompt:
+This is my current data loader
+
+class DataSegmenter2D(Dataset):
+    """TODO."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
+        """
+        Initialize the dataset, or a subset of the dataset, from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): The starting index of the images to load. Images before this index are not loaded.
+        """
+
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+ 
+
+        if (len(self.image_paths) != len(self.mask_paths)):
+            print(f"Warning. The number of images ({len(self.image_paths)}) does not equal the number of masks ({len(self.mask_paths)})")
+
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+
+        # Remove elements before the starting index
+        if (self.dataset_size <= start_index):
+            print(f"Warning: start index ({start_index}) >= the size of the data ({self.dataset_size}). No data will be stored.")
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+
+        # Update the size after removing elements
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Use subset if specified
+        if subset_size is not None and subset_size < self.dataset_size:
+            # If we're using a subset, we reduce the number of images.
+            
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            
+            # Print first to use the old size.
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size} total)")
+            self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        else:
+            print(f"Using all {self.dataset_size} samples")
+
+        # Optional augmentations
+       
+        
+        # Loads the subset into memory as pytorch tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
+
+        # self.masks is currently in the form [B, H, W, C] but pytorch expects [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
+        print("Images shape: ", self.images.shape)
+        print("Masks shape: ", self.masks.shape)
+        
+
+    def __len__(self):
+        return self.dataset_size
+    
+    def __getitem__(self, idx):
+        # Get image and mask
+        image, mask = self.images[idx], self.masks[idx]
+        
+        # Add channel dimension if missing
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # -> (1, H, W)
+
+        # The masks are one-hot encoded, so should be the right shape.
+        
+        return image, mask
+
+Apply your changes
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect — your `DataSegmenter2D` loader is clean and well-structured 👏
+
+To **add data augmentation**, we’ll integrate a `transform` argument so you can pass in augmentation logic (using `torchvision.transforms`, or better, `albumentations` for segmentation masks).
+
+Below, I’ll modify your code to support **optional augmentations** (while keeping your current design intact).
+
+---
+
+## ✅ Updated `DataSegmenter2D` (with augmentations)
+
+```python
+import torch
+from torch.utils.data import Dataset
+from glob import glob
+import torchvision.transforms.functional as F
+import random
+
+class DataSegmenter2D(Dataset):
+    """2D Medical Image + Mask dataset loader with optional augmentations."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0, augment=False):
+        """
+        Initialize the dataset or subset, with optional augmentations.
+
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): Index to start loading from.
+            augment (bool): Whether to apply random augmentations (default: False)
+        """
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+        self.augment = augment
+
+        if len(self.image_paths) != len(self.mask_paths):
+            print(f"⚠️ Warning: {len(self.image_paths)} images vs {len(self.mask_paths)} masks")
+
+        # Slice dataset
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Subset handling
+        if subset_size is not None and subset_size < self.dataset_size:
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size})")
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            self.dataset_size = subset_size
+        else:
+            print(f"Using all {self.dataset_size} samples")
+
+        # Load all data into memory
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
+
+        # Permute masks from [B, H, W, C] → [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
+        print("Images shape:", self.images.shape)
+        print("Masks shape:", self.masks.shape)
+
+    def __len__(self):
+        return self.dataset_size
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        mask = self.masks[idx]
+
+        # Add missing channel dim for grayscale
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # -> [1, H, W]
+
+        # Perform augmentations (same geometric changes to image & mask)
+        if self.augment:
+            # Random horizontal flip
+            if random.random() > 0.5:
+                image = F.hflip(image)
+                mask = F.hflip(mask)
+
+            # Random vertical flip
+            if random.random() > 0.5:
+                image = F.vflip(image)
+                mask = F.vflip(mask)
+
+            # Random rotation (90° increments for safe mask rotation)
+            k = random.randint(0, 3)
+            if k:
+                image = torch.rot90(image, k, [1, 2])
+                mask = torch.rot90(mask, k, [1, 2])
+
+        return image, mask
+```
+
+---
+
+## ✅ How to Use
+
+```python
+train_dataset = DataSegmenter2D(
+    train_img_path,
+    train_mask_path,
+    subset_size=100,
+    augment=True  # Enable random flips & rotations
+)
+
+val_dataset = DataSegmenter2D(
+    val_img_path,
+    val_mask_path,
+    augment=False
+)
+
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+```
+
+---
+
+## 🧠 Notes
+
+* Augmentations are **geometric only**, which keeps masks valid.
+  You can safely add brightness/contrast changes to `image` only if you wish.
+* You could swap the manual augmentations for **Albumentations**, which supports:
+
+  * random elastic deformations
+  * brightness/contrast
+  * Gaussian noise
+  * affine transformations
+    …and handles masks automatically.
+
+Would you like me to show you the **Albumentations version** of this loader?
+It’s typically much more flexible and faster for medical imaging.
+===================================================================================================
+Prompt:
+Use torchvision transforms
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent choice 👍 — `torchvision.transforms` gives you a clean, native way to apply augmentations — though you need to be careful with segmentation masks (since transforms like color jitter or normalization should **only** apply to images, not masks).
+
+Here’s a **fully updated** version of your `DataSegmenter2D` class using **torchvision transforms** for data augmentation while keeping everything else the same.
+
+---
+
+## ✅ Updated `DataSegmenter2D` with torchvision transforms
+
+```python
+import torch
+from torch.utils.data import Dataset
+from glob import glob
+import torchvision.transforms as T
+import torchvision.transforms.functional as F
+import random
+
+class DataSegmenter2D(Dataset):
+    """2D Medical Image + Mask dataset loader with optional torchvision augmentations."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0, augment=False):
+        """
+        Initialize dataset from paths, with optional torchvision augmentations.
+
+        Args:
+            image_path (str): Glob path to image files.
+            mask_path (str): Glob path to mask files.
+            subset_size (int or None): Optional limit on dataset size.
+            start_index (int): Index to start loading from.
+            augment (bool): If True, apply random torchvision transforms.
+        """
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+        self.augment = augment
+
+        if len(self.image_paths) != len(self.mask_paths):
+            print(f"⚠️ Warning: {len(self.image_paths)} images vs {len(self.mask_paths)} masks")
+
+        # Slice dataset by start index
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Limit to subset if requested
+        if subset_size is not None and subset_size < self.dataset_size:
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size})")
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            self.dataset_size = subset_size
+        else:
+            print(f"Using all {self.dataset_size} samples")
+
+        # Load tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
+
+        # Convert masks from [B, H, W, C] → [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
+        print("Images shape:", self.images.shape)
+        print("Masks shape:", self.masks.shape)
+
+        # Define torchvision augmentations for images only
+        self.image_only_transforms = T.Compose([
+            T.RandomAdjustSharpness(0.5, p=0.3),
+            T.ColorJitter(brightness=0.1, contrast=0.1),
+        ])
+
+        # Define paired geometric transforms (applied to both image + mask)
+        self.geometric_transforms = [
+            self.random_horizontal_flip,
+            self.random_vertical_flip,
+            self.random_rotation,
+        ]
+
+    def __len__(self):
+        return self.dataset_size
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        mask = self.masks[idx]
+
+        # Ensure shape [1, H, W]
+        if image.ndim == 2:
+            image = image.unsqueeze(0)
+
+        if self.augment:
+            # Apply geometric transforms (paired)
+            for transform in self.geometric_transforms:
+                image, mask = transform(image, mask)
+
+            # Apply image-only transforms (color, brightness, etc.)
+            # Only valid for RGB images — skip for grayscale
+            if image.shape[0] == 3:
+                image = self.image_only_transforms(image)
+
+        return image, mask
+
+    # ----- Helper geometric transforms -----
+    def random_horizontal_flip(self, image, mask, p=0.5):
+        if random.random() < p:
+            image = F.hflip(image)
+            mask = F.hflip(mask)
+        return image, mask
+
+    def random_vertical_flip(self, image, mask, p=0.5):
+        if random.random() < p:
+            image = F.vflip(image)
+            mask = F.vflip(mask)
+        return image, mask
+
+    def random_rotation(self, image, mask, degrees=(-15, 15)):
+        if random.random() < 0.5:
+            angle = random.uniform(*degrees)
+            image = F.rotate(image, angle)
+            mask = F.rotate(mask, angle, interpolation=T.InterpolationMode.NEAREST)
+        return image, mask
+```
+
+---
+
+## ✅ Example Usage
+
+```python
+from torch.utils.data import DataLoader
+
+train_dataset = DataSegmenter2D(
+    image_path="Data/train/*.nii.gz",
+    mask_path="Data/mask_train/*.nii.gz",
+    subset_size=100,
+    augment=True  # 🔥 enable torchvision augmentations
+)
+
+val_dataset = DataSegmenter2D(
+    image_path="Data/val/*.nii.gz",
+    mask_path="Data/mask_val/*.nii.gz",
+    augment=False
+)
+
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+```
+
+---
+
+## 🧠 Key Notes
+
+* **Image-only transforms** like `ColorJitter` or `AdjustSharpness` are applied only to the **images** (not masks).
+* **Geometric transforms** like flips and rotations apply to **both**.
+* If your MRI data is grayscale (1-channel), `ColorJitter` will be skipped automatically.
+* For medical datasets, you can add more spatial transforms like `RandomAffine`, `RandomResizedCrop`, etc., as long as you apply them equally to the mask.
+
+---
+
+Would you like me to add **intensity augmentations** (e.g. random Gaussian noise, brightness shifts, gamma corrections) tuned for **MRI data** next?
+They often help generalization much more than color-based transforms.
+===================================================================================================
+Prompt:
+Put 
+
+        # Optional augmentations
+        if augment:
+            self.transforms = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(15),
+                transforms.RandomResizedCrop(size=(256, 128), scale=(0.9, 1.1)),
+            ])
+        else:
+            self.transforms = transforms.Compose([
+                transforms.Resize((256, 128))
+            ])
+
+into the the getitem to apply the transformations
+---------------------------------------------------------------------------------------------------
+Response:
+Perfect ✅ — you’re on the right track.
+However, since **segmentations require applying the exact same spatial transform** to both the image and the mask, we can’t use `transforms.Compose` directly (because torchvision transforms don’t automatically apply to both).
+Instead, we’ll **manually apply the same random params** to both using the functional API (`torchvision.transforms.functional`).
+
+Here’s your updated `DataSegmenter2D` with your requested transforms integrated properly inside `__getitem__`:
+
+---
+
+### ✅ Updated `DataSegmenter2D` (transform applied in `__getitem__`)
+
+```python
+import torch
+from torch.utils.data import Dataset
+from glob import glob
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as F
+import random
+
+class DataSegmenter2D(Dataset):
+    """2D Medical Image + Mask dataset loader with paired augmentations."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0, augment=False):
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+        self.augment = augment
+
+        if len(self.image_paths) != len(self.mask_paths):
+            print(f"⚠️ Warning: {len(self.image_paths)} images vs {len(self.mask_paths)} masks")
+
+        # Slice by start index
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Subset if requested
+        if subset_size is not None and subset_size < self.dataset_size:
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size})")
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            self.dataset_size = subset_size
+        else:
+            print(f"Using all {self.dataset_size} samples")
+
+        # Load tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
+
+        # Convert masks [B, H, W, C] → [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
+        print("Images shape:", self.images.shape)
+        print("Masks shape:", self.masks.shape)
+
+        # Define resize transform for evaluation mode
+        self.resize = transforms.Resize((256, 128))
+
+    def __len__(self):
+        return self.dataset_size
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        mask = self.masks[idx]
+
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # (1, H, W)
+
+        # Convert to float
+        image = image.float()
+        mask = mask.float()
+
+        # Apply augmentations
+        if self.augment:
+            # Random horizontal flip
+            if random.random() < 0.5:
+                image = F.hflip(image)
+                mask = F.hflip(mask)
+
+            # Random rotation between -15 and +15 degrees
+            angle = random.uniform(-15, 15)
+            image = F.rotate(image, angle)
+            mask = F.rotate(mask, angle, interpolation=transforms.InterpolationMode.NEAREST)
+
+            # Random resized crop
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                image, scale=(0.9, 1.1), ratio=(1.0, 1.0)
+            )
+            image = F.resized_crop(image, i, j, h, w, size=(256, 128))
+            mask = F.resized_crop(mask, i, j, h, w, size=(256, 128), interpolation=transforms.InterpolationMode.NEAREST)
+
+        else:
+            # Just resize (no augmentation)
+            image = self.resize(image)
+            mask = self.resize(mask)
+
+        return image, mask
+```
+
+---
+
+### ✅ Explanation
+
+* We **moved the transform logic into `__getitem__`** exactly as you wanted.
+* Used **torchvision functional transforms (`F`)** so we can apply the *same random parameters* to both image and mask.
+* The interpolation for masks is set to `NEAREST`, so class labels aren’t blurred.
+* For the non-augmented path, it just resizes cleanly to `(256, 128)`.
+
+---
+
+### 🧠 Example Usage
+
+```python
+train_dataset = DataSegmenter2D(
+    "Data/train/images/*.nii.gz",
+    "Data/train/masks/*.nii.gz",
+    augment=True
+)
+
+test_dataset = DataSegmenter2D(
+    "Data/test/images/*.nii.gz",
+    "Data/test/masks/*.nii.gz",
+    augment=False
+)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+```
+
+---
+
+Would you like me to extend this with **intensity-based augmentations** (brightness jitter, random Gaussian noise, etc.) tuned for MRI data as well?
+They often give better improvements than geometric transforms alone.
+===================================================================================================
+Prompt:
+I changed my DataSegmenter to be
+
+class DataSegmenter2D(Dataset):
+    """TODO."""
+
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0, augment=False):
+        """
+        Initialize the dataset, or a subset of the dataset, from image and mask path patterns.
+        
+        Args:
+            image_path (str): Glob path to image files, e.g. 'Data/.../train/*.nii.gz'
+            mask_path (str): Glob path to mask files, e.g. 'Data/.../seg_train/*.nii.gz'
+            subset_size (int or None): If set, limits how many samples are loaded.
+            start_index (int): The starting index of the images to load. Images before this index are not loaded.
+        """
+
+        self.image_paths = sorted(glob(image_path))
+        self.mask_paths = sorted(glob(mask_path))
+        self.augment = augment
+
+        if (len(self.image_paths) != len(self.mask_paths)):
+            print(f"Warning. The number of images ({len(self.image_paths)}) does not equal the number of masks ({len(self.mask_paths)})")
+
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+
+        # Remove elements before the starting index
+        if (self.dataset_size <= start_index):
+            print(f"Warning: start index ({start_index}) >= the size of the data ({self.dataset_size}). No data will be stored.")
+        self.image_paths = self.image_paths[start_index:]
+        self.mask_paths = self.mask_paths[start_index:]
+
+        # Update the size after removing elements
+        self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        print(f"There are {self.dataset_size} samples beyond the start index")
+
+        # Use subset if specified
+        if subset_size is not None and subset_size < self.dataset_size:
+            # If we're using a subset, we reduce the number of images.
+            
+            self.image_paths = self.image_paths[:subset_size]
+            self.mask_paths = self.mask_paths[:subset_size]
+            
+            # Print first to use the old size.
+            print(f"Using subset of {subset_size} samples (out of {self.dataset_size} total)")
+            self.dataset_size = min(len(self.image_paths), len(self.mask_paths))
+        else:
+            print(f"Using all {self.dataset_size} samples")
+        
+        # Loads the subset into memory as pytorch tensors
+        self.images = torch.from_numpy(load_data_2D(self.image_paths, normImage=True))
+        self.masks = torch.from_numpy(load_data_2D(self.mask_paths, categorical=True, num_classes=6))
+
+        # self.masks is currently in the form [B, H, W, C] but pytorch expects [B, C, H, W]
+        self.masks = torch.permute(self.masks, (0, 3, 1, 2))
+
+        print("Images shape: ", self.images.shape)
+        print("Masks shape: ", self.masks.shape)
+        
+
+    def __len__(self):
+        return self.dataset_size
+    
+    def __getitem__(self, idx):
+        # Get image and mask
+        image, mask = self.images[idx], self.masks[idx]
+        
+        # Add channel dimension if missing
+        if image.ndim == 2:
+            image = image.unsqueeze(0)  # -> (1, H, W)
+
+        # The masks are one-hot encoded, so should be the right shape.
+
+        # Perform augmentations (same geometric changes to image & mask)
+        if self.augment:
+            # Random horizontal flip
+            if random.random() > 0.5:
+                image = F.hflip(image)
+                mask = F.hflip(mask)
+
+            # Random vertical flip
+            if random.random() > 0.5:
+                image = F.vflip(image)
+                mask = F.vflip(mask)
+
+            # Random rotation (90° increments for safe mask rotation)
+            k = random.randint(0, 3)
+            if k:
+                image = torch.rot90(image, k, [1, 2])
+                mask = torch.rot90(mask, k, [1, 2])
+        
+        return image, mask
+
+But since my data is 256*128, this caused the issue
+RuntimeError: stack expects each tensor to be equal size, but got [1, 256, 128] at entry 0 and [1, 128, 256] at entry 1
+
+Should I just remove the rotation?
+---------------------------------------------------------------------------------------------------
+Response:
+Good question — you need to import from **`torchvision`** and **`torchvision.transforms.functional`**.
+
+Here’s what to include at the top of your file 👇
+
+```python
+import torch
+import random
+from torch.utils.data import Dataset
+from torchvision import transforms
+import torchvision.transforms.functional as F
+from glob import glob
+```
+
+✅ **Explanation**:
+
+* `transforms` — gives you access to the standard augmentation classes (`Resize`, `Compose`, etc.)
+* `torchvision.transforms.functional as F` — gives you the lower-level, *functional* operations like `F.hflip`, `F.vflip`, and `F.rotate`, which you can apply directly to both **image** and **mask** consistently.
+
+So your imports should look like this:
+
+```python
+import torch
+import random
+from torch.utils.data import Dataset
+from torchvision import transforms
+import torchvision.transforms.functional as F
+from glob import glob
+```
+
+Would you like me to show the full updated `DataSegmenter2D` class with the correct imports and small-angle rotation fix integrated?
+===================================================================================================

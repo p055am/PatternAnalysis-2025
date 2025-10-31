@@ -22,7 +22,7 @@ import random
 
 # Check if CUDA is available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Using device: {device}')
+print(f'Modules Using device: {device}')
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)

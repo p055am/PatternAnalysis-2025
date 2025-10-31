@@ -44,7 +44,7 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
 
     losses = []
 
-    print(" Starting training with Batch Norm, LeakyReLU, and Sigmoid activation...")
+    print(" Starting training with Batch Norm, LeakyReLU.")
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
@@ -75,7 +75,11 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
         if (epoch) % visualize_every == 0:
             show_epoch_predictions(model, test_dataset, epoch + 1, n=3)
 
-    print(" Training complete with enhanced U-Net!")
+    print(" Training complete with enhanced U-Net! Saving results.")
+    
+    # Save results
+    torch.save(model.state_dict(), "unet_hip_mri.pth")
+
     return losses
 
 
@@ -237,7 +241,7 @@ def plot_loss(losses, loss_type='dice'):
 def main():
     # Create datasets with subset for faster training/demo
     # Set subset_size=None to use full dataset, or specify a number for quick demo
-    subset_size = 2000  # Use 100 samples for demo
+    subset_size = 500  # Use 2000 samples for demo
     # subset_size = None  # Uncomment this to use full dataset
 
     print("🔄 Loading datasets (normalized to zero mean & unit std)...")
@@ -245,7 +249,7 @@ def main():
     print("Getting training data")
     train_img_path = dataset.get_image_path_hip_mri('train', 'image')
     train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
-    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size, augment=True)
     print(f"Number of training samples: {len(train_dataset)}")
 
     print("Getting validation data")
@@ -268,7 +272,7 @@ def main():
 
     # 1 input channel because grayscale, 6 output channels because 6 segments
     model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-    losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=50)
+    losses = train(model, train_loader, validate_dataset, epochs=21, lr=0.001, visualize_every=10)
     plot_loss(losses, loss_type='dice')
 
 if __name__ == "__main__":

@@ -5,6 +5,9 @@ import os
 from glob import glob
 import torch
 from torch.utils.data import Dataset
+import torchvision.transforms.functional as F
+from torchvision import transforms
+import random
 
 def to_channels(arr: np.ndarray, dtype=np.uint8, num_classes=None) -> np.ndarray:
     if num_classes is None:
@@ -78,7 +81,7 @@ def load_data_2D(imageNames, normImage=False, categorical=False, dtype=np.float3
 class DataSegmenter2D(Dataset):
     """TODO."""
 
-    def __init__(self, image_path, mask_path, subset_size=None, start_index=0):
+    def __init__(self, image_path, mask_path, subset_size=None, start_index=0, augment=False):
         """
         Initialize the dataset, or a subset of the dataset, from image and mask path patterns.
         
@@ -91,6 +94,7 @@ class DataSegmenter2D(Dataset):
 
         self.image_paths = sorted(glob(image_path))
         self.mask_paths = sorted(glob(mask_path))
+        self.augment = augment
 
         if (len(self.image_paths) != len(self.mask_paths)):
             print(f"Warning. The number of images ({len(self.image_paths)}) does not equal the number of masks ({len(self.mask_paths)})")
@@ -133,7 +137,7 @@ class DataSegmenter2D(Dataset):
 
     def __len__(self):
         return self.dataset_size
-
+    
     def __getitem__(self, idx):
         # Get image and mask
         image, mask = self.images[idx], self.masks[idx]
@@ -143,7 +147,24 @@ class DataSegmenter2D(Dataset):
             image = image.unsqueeze(0)  # -> (1, H, W)
 
         # The masks are one-hot encoded, so should be the right shape.
-        
+
+        # Perform augmentations (same geometric changes to image & mask)
+        if self.augment:
+            # Random horizontal flip
+            if random.random() > 0.5:
+                image = F.hflip(image)
+                mask = F.hflip(mask)
+
+            # Random vertical flip
+            if random.random() > 0.5:
+                image = F.vflip(image)
+                mask = F.vflip(mask)
+
+            # Random small-angle rotation (keeps same output size)
+            angle = random.uniform(-15, 15)
+            image = F.rotate(image, angle, interpolation=transforms.InterpolationMode.BILINEAR)
+            mask = F.rotate(mask, angle, interpolation=transforms.InterpolationMode.NEAREST)
+                    
         return image, mask
 
 

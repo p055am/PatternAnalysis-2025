@@ -12,51 +12,78 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-from PIL import Image
-from tqdm import tqdm
-import random
 
-def show_predictions(model, dataset, title="🎯 Binary Segmentation Results (Normalized Color)", n=3):
-    """Show model predictions vs ground truth for normalized color-based binary segmentation."""
-    model.eval()
-    fig, axes = plt.subplots(3, n, figsize=(12, 9))
-    fig.suptitle(title, fontsize=16, fontweight='bold')
+from modules import SimpleUNet
+import dataset
+import torch
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Predict Using device: {device}')
+
+def evaluate_model(model_path, test_dataset, num_classes=6):
+    """
+    Loads a saved model and evaluates Dice scores for each class on the given dataset.
+
+    Args:
+        model_path (str): Path to the saved model .pth file
+        dataset (torch.utils.data.Dataset): Dataset to evaluate (e.g., test set)
+        num_classes (int): Number of segmentation classes (default 6)
+    """
+    import torch
+    import torch.nn.functional as F
+    from tqdm import tqdm
+    import numpy as np
+
+
+    # --- Load model ---
+    model = SimpleUNet(in_channels=1, out_channels=num_classes, dropout_p=0.2)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval() # Sets the model to evaluation mode
+
+    # --- Initialize Dice tracking ---
+    dice_scores = np.zeros(num_classes)
+    eps = 1e-6  # avoid divide-by-zero
+
+    # --- Iterate through dataset ---
+    loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+    print("Evaluating model on dataset...")
     with torch.no_grad():
-        for i in range(n):
-            image, true_mask = dataset[i]
+        for images, masks in tqdm(loader):
+            images, masks = images.to(device), masks.to(device)
 
-            # Predict with sigmoid model
-            pred = model(image.unsqueeze(0).to(device))
-            # Get pet class probability and convert to binary
-            pred_pet_prob = pred[0, 0].cpu().numpy()  # Pet class probability
-            pred_binary = (pred_pet_prob > 0.5).astype(int)  # Binary prediction
+            preds = model(images)  # [B, C, H, W]
+            preds = F.softmax(preds, dim=1)
+            
+            # Compute Dice per class
+            preds_flat = preds.view(preds.shape[0], preds.shape[1], -1)
+            masks_flat = masks.view(masks.shape[0], masks.shape[1], -1)
 
-            # Denormalize image for visualization
-            img_show = denormalize_image(image)
+            intersection = (preds_flat * masks_flat).sum(dim=2)
+            union = preds_flat.sum(dim=2) + masks_flat.sum(dim=2)
 
-            # Show original color image (transpose from CHW to HWC for matplotlib)
-            img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
-            axes[0, i].imshow(img_display)
-            axes[0, i].set_title(f'Original {i+1}', fontweight='bold')
-            axes[0, i].axis('off')
+            dice = (2.0 * intersection + eps) / (union + eps)
+            dice_scores += dice.mean(dim=0).cpu().numpy()  # average across batch
 
-            # Show ground truth binary mask
-            axes[1, i].imshow(true_mask, cmap='RdYlBu_r', vmin=0, vmax=1)
-            axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
-            axes[1, i].axis('off')
+    # Average across dataset
+    dice_scores /= len(loader)
 
-            # Show prediction
-            axes[2, i].imshow(pred_binary, cmap='RdYlBu_r', vmin=0, vmax=1)
-            accuracy = np.mean(pred_binary == true_mask.numpy())
-            axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.2f})', fontweight='bold')
-            axes[2, i].axis('off')
+    # --- Report results ---
+    segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
+    print("Dice Scores per Class:")
+    for label, score in zip(segment_labels, dice_scores):
+        print(f"  {label:<12}: {score:.4f}")
 
-    plt.tight_layout()
-    plt.show()
+    print(f"Mean Dice Score: {dice_scores.mean():.4f}")
+    return dice_scores
 
-# Show results
-show_predictions(model, test_dataset)
+
+# Runs the evaluation
+print("Getting testing data")
+test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path)
+print(f"Number of test samples: {len(test_dataset)}")
+
+evaluate_model('unet_hip_mri.pth', test_dataset)
