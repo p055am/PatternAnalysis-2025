@@ -13,16 +13,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-import os
-from PIL import Image
-from tqdm import tqdm
 import random
+
 import modules
 import dataset
 
@@ -37,14 +33,14 @@ random.seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(42)
 
-def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every=1):
+def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every=1, save_every=1):
     model.to(device)
     criterion = DiceLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     losses = []
 
-    print(" Starting training with Batch Norm, LeakyReLU.")
+    print("Starting training with Batch Norm, LeakyReLU.")
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
@@ -69,16 +65,19 @@ def train(model, train_loader, test_dataset, epochs=3, lr=0.001, visualize_every
 
         avg_loss = epoch_loss / len(train_loader)
         losses.append(avg_loss)
-        print(f"📈 Epoch {epoch+1}/{epochs} Complete: Avg Loss = {avg_loss:.4f}")
+        print(f"Epoch {epoch+1}/{epochs} Complete: Avg Loss = {avg_loss:.4f}")
 
         # Visualize predictions after each epoch (or every few epochs)
         if (epoch) % visualize_every == 0:
             show_epoch_predictions(model, test_dataset, epoch + 1, n=3)
+        
+        if (epoch) % save_every == 0:
+            torch.save(model.state_dict(), f"epoch_{epoch}_save.pth")
 
-    print(" Training complete with enhanced U-Net! Saving results.")
+    print("Training complete with enhanced U-Net! Saving results.")
     
     # Save results
-    torch.save(model.state_dict(), "unet_hip_mri.pth")
+    torch.save(model.state_dict(), "final.pth")
 
     return losses
 
@@ -179,7 +178,7 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
     """Show model predictions after a specific epoch."""
     model.eval()
     fig, axes = plt.subplots(3, n, figsize=(12, 9))
-    fig.suptitle(f'🎯 Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
+    fig.suptitle(f'Predictions After Epoch {epoch}', fontsize=16, fontweight='bold')
 
     # Segment labels and colors (same as show_examples)
     segment_labels = ['Empty', 'Body Outline', 'Bone', 'Bladder', 'Rectum', 'Prostate'][:num_classes]
@@ -228,11 +227,11 @@ def plot_loss(losses, loss_type='dice'):
     plt.plot(losses, 'bo-', linewidth=2, markersize=8)
 
     title_map = {
-        'bce': '🔥 Training Loss (BCE)',
-        'dice': '🔥 Training Loss (Dice)',
-        'combined': '🔥 Training Loss (Combined BCE + Dice)'
+        'bce': 'Training Loss (BCE)',
+        'dice': 'Training Loss (Dice)',
+        'combined': 'Training Loss (Combined BCE + Dice)'
     }
-    plt.title(title_map.get(loss_type, '🔥 Training Loss'), fontsize=14, fontweight='bold')
+    plt.title(title_map.get(loss_type, 'Training Loss'), fontsize=14, fontweight='bold')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.grid(True, alpha=0.3)
@@ -249,7 +248,7 @@ def main():
     print("Getting training data")
     train_img_path = dataset.get_image_path_hip_mri('train', 'image')
     train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
-    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size, augment=True)
+    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size, augment=True, start_index=2000)
     print(f"Number of training samples: {len(train_dataset)}")
 
     print("Getting validation data")
@@ -265,14 +264,15 @@ def main():
     #print(f"Number of test samples: {len(test_dataset)}")
 
     # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=25, shuffle=True)
 
     # Show examples
     show_examples(train_dataset, "Initial examples")
 
     # 1 input channel because grayscale, 6 output channels because 6 segments
     model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-    losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=25)
+    model.load_state_dict(torch.load('models/epoch_100_save.pth', map_location=device)) # comment out if we don't want to load a prev example.
+    losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=1, save_every=10)
     plot_loss(losses, loss_type='dice')
 
 if __name__ == "__main__":

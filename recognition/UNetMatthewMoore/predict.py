@@ -5,13 +5,7 @@
 # https://colab.research.google.com/drive/1VOsZSyRhyuHLmgoqGriQk01ub4bKNmZ1?usp=sharing#scrollTo=0ec83094
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
-
 
 from modules import SimpleUNet
 import dataset
@@ -86,7 +80,7 @@ def main():
     test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path)
     print(f"Number of test samples: {len(test_dataset)}")
 
-    evaluate_model('models/long_training.pth', test_dataset)
+    evaluate_model('models/epoch_100_save.pth', test_dataset)
 
 
 if __name__ == '__main__':

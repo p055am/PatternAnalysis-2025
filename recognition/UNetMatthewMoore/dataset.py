@@ -1,7 +1,6 @@
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
-import os
 from glob import glob
 import torch
 from torch.utils.data import Dataset
