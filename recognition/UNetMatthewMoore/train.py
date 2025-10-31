@@ -233,39 +233,43 @@ def plot_loss(losses, loss_type='dice'):
     plt.grid(True, alpha=0.3)
     plt.show()
 
-# Create datasets with subset for faster training/demo
-# Set subset_size=None to use full dataset, or specify a number for quick demo
-subset_size = 500  # Use 100 samples for demo
-# subset_size = None  # Uncomment this to use full dataset
+def main():
+    # Create datasets with subset for faster training/demo
+    # Set subset_size=None to use full dataset, or specify a number for quick demo
+    subset_size = 500  # Use 100 samples for demo
+    # subset_size = None  # Uncomment this to use full dataset
 
-print("🔄 Loading datasets (normalized to zero mean & unit std)...")
-# Get file lists
-print("Getting training data")
-train_img_path = dataset.get_image_path_hip_mri('train', 'image')
-train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
-train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
-print(f"Number of training samples: {len(train_dataset)}")
+    print("🔄 Loading datasets (normalized to zero mean & unit std)...")
+    # Get file lists
+    print("Getting training data")
+    train_img_path = dataset.get_image_path_hip_mri('train', 'image')
+    train_mask_path = dataset.get_image_path_hip_mri('train', 'mask')
+    train_dataset = dataset.DataSegmenter2D(train_img_path, train_mask_path, subset_size=subset_size)
+    print(f"Number of training samples: {len(train_dataset)}")
 
-print("Getting validation data")
-validate_img_path = dataset.get_image_path_hip_mri('validate', 'image')
-validate_mask_path = dataset.get_image_path_hip_mri('validate', 'mask')
-validate_dataset = dataset.DataSegmenter2D(validate_img_path, validate_mask_path, subset_size=(subset_size // 2))
-print(f"Number of validation samples: {len(validate_dataset)}")
+    print("Getting validation data")
+    validate_img_path = dataset.get_image_path_hip_mri('validate', 'image')
+    validate_mask_path = dataset.get_image_path_hip_mri('validate', 'mask')
+    validate_dataset = dataset.DataSegmenter2D(validate_img_path, validate_mask_path, subset_size=(subset_size // 2))
+    print(f"Number of validation samples: {len(validate_dataset)}")
 
-print("Getting testing data")
-test_img_path = dataset.get_image_path_hip_mri('test', 'image')
-test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
-test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
-print(f"Number of test samples: {len(test_dataset)}")
+    print("Getting testing data")
+    test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+    test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+    test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
+    print(f"Number of test samples: {len(test_dataset)}")
 
-# Data loaders
-train_loader = DataLoader(train_dataset, batch_size=12, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=12, shuffle=False)
+    # Data loaders
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
-# Show examples
-show_examples(train_dataset, "Initial examples", starting_index=30)
+    # Show examples
+    show_examples(train_dataset, "Initial examples", starting_index=30)
 
-# 1 input channel because grayscale, 6 output channels because 6 segments
-model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-losses = train(model, train_loader, test_dataset, epochs=21, lr=0.001, visualize_every=10)
-plot_loss(losses, loss_type='dice')
+    # 1 input channel because grayscale, 6 output channels because 6 segments
+    model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
+    losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=50)
+    plot_loss(losses, loss_type='dice')
+
+if __name__ == "__main__":
+    main()
