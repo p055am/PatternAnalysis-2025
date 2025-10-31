@@ -1,10 +1,10 @@
-Segmenting Hip MRI study data.
+# Segmenting Hip MRI study data.
 
 This project attempts to segment Hip MRI study data to identify different segments of the data.
 The data has been segmented by a MR physicist into 6 categories; Empty, Body outline, Bone, Bladder, Rectum, and Prostate.
 
 
-Algorithm:
+# Algorithm:
 This project segments the data using the UNet structure. The UNet architecture is a modified version of
 the autoencoded architecture, featuring skip connections between layers.
 The UNet implementation in this project uses three encoding convolution layers, and three decoding convolution layers.
@@ -15,7 +15,7 @@ Each convolution layer contains several steps, namely:
 Conv -> BN -> LeakyReLU -> Dropout -> Conv -> BN -> LeakyReLU -> Dropout
 
 
-Results:
+# Results:
 The results of the project were disappointing. After 100 epochs of training, the Dice loss for each segment type was:
 
 Dice Scores per Class:
@@ -50,10 +50,7 @@ As seen, the smaller segments (the prostate and rectum) are simply ignored. Due 
 the loss function likely punishes the model more for wrongly identifying these two organs than for identifying them.
 As such, by simply ignoring them, their average scores increase. This is likely the cause of the sharp drop in loss.
 
-Depenencies:
-List any dependencies required, including versions and address reproducibility of results, if applicable.
-
-Data requirements:
+# Data requirements:
 The Hip MRI data was downloaded from the uq Rangpur, at the file path:
 /home/groups/comp3710/HipMRI_Study_open
 Alternatively, the files can also be found here: https://data.csiro.au/collection/csiro:51392v2?redirected=true
