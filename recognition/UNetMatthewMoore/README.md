@@ -31,7 +31,7 @@ The average dice loss over time was as follows.
 
 ![Description of image]("images/dice_loss_chart.png)
 
-While these results seem to be slowly improving, looking at the data shows that the .
+While these results seem to be slowly improving, looking at the data shows that this is misleading.
 For example, these are images representing the segmentation around epoch 60 (Before the large drop in dice loss)
 
 ![Before drop]("images/epoch_60_data_1.png")
