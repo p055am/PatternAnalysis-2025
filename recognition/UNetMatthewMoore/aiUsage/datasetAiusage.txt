@@ -3526,3 +3526,110 @@ print("Per-class dice:", dice_per_class.mean(0))
 ---
 
 Would you like me to rewrite your `SimpleUNet` and training loop with all these fixes applied (clean, ready-to-run)? It’ll make it much easier to debug GPU usage and training stability.
+===================================================================================================
+Next, I needed to save my models to test and demonstrate later.
+Prompt:
+How can I save my models to test and use later?
+---------------------------------------------------------------------------------------------------
+Response:
+Excellent question 👍 — saving and reusing trained models is essential for testing, comparison, or deployment.
+
+Here’s a clear guide on how to **save and load your PyTorch models** properly 👇
+
+---
+
+## 🧠 1️⃣ Save the model after training
+
+At the end of your training function (e.g. `train()`), you can add:
+
+```python
+# Save full model state
+torch.save(model.state_dict(), "unet_hip_mri.pth")
+print("✅ Model saved as unet_hip_mri.pth")
+```
+
+💡 `state_dict()` stores only the learned weights (not the entire model object), which is the recommended, lightweight way.
+
+---
+
+## 🧠 2️⃣ Load the model later for testing or inference
+
+When you want to reuse the model:
+
+```python
+from modules import SimpleUNet
+import torch
+
+# Recreate the same model architecture
+model = SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
+
+# Load weights
+model.load_state_dict(torch.load("unet_hip_mri.pth", map_location='cuda' if torch.cuda.is_available() else 'cpu'))
+
+model.eval()  # Important for inference
+print("✅ Model loaded and ready for testing")
+```
+
+This will restore your model exactly as it was when saved.
+
+---
+
+## 🧪 3️⃣ Test or visualize predictions
+
+After loading:
+
+```python
+show_epoch_predictions(model, test_dataset, epoch="Loaded Model", n=3)
+```
+
+Or evaluate performance:
+
+```python
+model.eval()
+with torch.no_grad():
+    for images, masks in test_loader:
+        images, masks = images.to(device), masks.to(device)
+        outputs = model(images)
+        # compute Dice or accuracy here
+```
+
+---
+
+## ⚙️ 4️⃣ Optional: save checkpoints (for long training)
+
+If you want to **resume training later**, save everything you need:
+
+```python
+torch.save({
+    'epoch': epoch,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'loss': avg_loss,
+}, "checkpoint_epoch_50.pth")
+```
+
+Then to resume:
+
+```python
+checkpoint = torch.load("checkpoint_epoch_50.pth", map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+start_epoch = checkpoint['epoch']
+loss = checkpoint['loss']
+```
+
+---
+
+## 🧩 Summary
+
+| Purpose                  | Code                                             | Notes                      |
+| ------------------------ | ------------------------------------------------ | -------------------------- |
+| Save model weights       | `torch.save(model.state_dict(), "model.pth")`    | Best practice              |
+| Load model weights       | `model.load_state_dict(torch.load("model.pth"))` | Use same architecture      |
+| Save training checkpoint | Save dict with model + optimizer                 | For resuming training      |
+| Load checkpoint          | Load both model and optimizer states             | Resume training seamlessly |
+
+---
+
+Would you like me to show you exactly where to insert the save/load logic in your current `train()` and testing code so it’s automatic?
+===================================================================================================

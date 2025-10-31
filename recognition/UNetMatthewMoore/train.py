@@ -131,7 +131,7 @@ def denormalize_image(tensor):
     denorm_tensor = tensor * std + mean
     return torch.clamp(denorm_tensor, 0, 1)
 
-def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, starting_index=0):
+def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6):
     """Quick visualization of some Hip MRI data, with labelled masks."""
     fig, axes = plt.subplots(2, n, figsize=(12, 6))
     fig.suptitle(title, fontsize=16, fontweight='bold')
@@ -142,7 +142,7 @@ def show_examples(dataset, title="Dataset Examples", n=5, num_classes=6, startin
     cmap = ListedColormap(segment_colors) # type: ignore
 
     for i in range(n):
-        index = i + starting_index
+        index = random.randint(0, len(dataset) - 1)
         image, mask = dataset[index] # mask is one-hot: [C, H, W]. 
 
         # Denormalize image for visualization
@@ -184,7 +184,8 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
 
     with torch.no_grad():
         for i in range(n):
-            image, true_mask = dataset[i]
+            index = random.randint(0, len(dataset) - 1)
+            image, true_mask = dataset[index]
 
             # Predict with sigmoid model
             pred = model(image.unsqueeze(0).to(device)) # The unsqueeze makes sure it has batch dimension
@@ -199,18 +200,18 @@ def show_epoch_predictions(model, dataset, epoch, n=3, num_classes=6):
             # Show original color image (transpose from CHW to HWC for matplotlib)
             img_display = img_show.permute(1, 2, 0).numpy()  # CHW -> HWC
             axes[0, i].imshow(img_display, cmap='gray')
-            axes[0, i].set_title(f'Original {i+1}', fontweight='bold')
+            axes[0, i].set_title(f'Original {index+1}', fontweight='bold')
             axes[0, i].axis('off')
 
             # Show ground truth mask
             axes[1, i].imshow(true_mask_np, cmap=cmap, vmin=0, vmax=num_classes)
-            axes[1, i].set_title(f'Ground Truth {i+1}', fontweight='bold')
+            axes[1, i].set_title(f'Ground Truth {index+1}', fontweight='bold')
             axes[1, i].axis('off')
 
             # Show prediction with accuracy
             axes[2, i].imshow(pred_mask, cmap=cmap, vmin=0, vmax=num_classes)
             accuracy = np.mean(pred_mask == true_mask_np)
-            axes[2, i].set_title(f'Prediction {i+1} (Acc: {accuracy:.3f})', fontweight='bold')
+            axes[2, i].set_title(f'Prediction {index+1} (Acc: {accuracy:.3f})', fontweight='bold')
             axes[2, i].axis('off')
 
     plt.tight_layout()
@@ -236,7 +237,7 @@ def plot_loss(losses, loss_type='dice'):
 def main():
     # Create datasets with subset for faster training/demo
     # Set subset_size=None to use full dataset, or specify a number for quick demo
-    subset_size = 500  # Use 100 samples for demo
+    subset_size = 2000  # Use 100 samples for demo
     # subset_size = None  # Uncomment this to use full dataset
 
     print("🔄 Loading datasets (normalized to zero mean & unit std)...")
@@ -253,18 +254,17 @@ def main():
     validate_dataset = dataset.DataSegmenter2D(validate_img_path, validate_mask_path, subset_size=(subset_size // 2))
     print(f"Number of validation samples: {len(validate_dataset)}")
 
-    print("Getting testing data")
-    test_img_path = dataset.get_image_path_hip_mri('test', 'image')
-    test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
-    test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
-    print(f"Number of test samples: {len(test_dataset)}")
+    #print("Getting testing data")
+    #test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+    #test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+    #test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path, subset_size=(subset_size // 2))
+    #print(f"Number of test samples: {len(test_dataset)}")
 
     # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
     # Show examples
-    show_examples(train_dataset, "Initial examples", starting_index=30)
+    show_examples(train_dataset, "Initial examples")
 
     # 1 input channel because grayscale, 6 output channels because 6 segments
     model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
