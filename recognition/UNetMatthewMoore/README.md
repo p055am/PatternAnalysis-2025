@@ -6,7 +6,7 @@ The data has been segmented by a MR physicist into 6 categories; Empty, Body out
 
 # Algorithm:
 This project segments the data using the UNet structure. The UNet architecture is a modified version of
-the autoencoded architecture, featuring skip connections between layers.
+the autoencoder architecture, featuring skip connections between layers.
 The UNet implementation in this project uses three encoding convolution layers, and three decoding convolution layers.
 The first encoding layer has a skip connection to the last decoding layer, the second 
 encoding layer has a skip connection to the second last decoding layer, and so on.
