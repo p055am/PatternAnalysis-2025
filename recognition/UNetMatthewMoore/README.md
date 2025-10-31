@@ -36,7 +36,7 @@ For example, these are images representing the segmentation around epoch 60 (Bef
 
 ![Before drop]("images/epoch_60_data_1.png")
 
-![Before drop]("images/epoch_60_data_1.png")
+![Before drop]("images/epoch_60_data_2.png")
 
 As seen, while somewhat inaccurate, it generally identifies each segment. In contrast, here is an image from epoch
 100 (the final model)
@@ -44,7 +44,7 @@ As seen, while somewhat inaccurate, it generally identifies each segment. In con
 
 ![Before drop]("images/epoch_100_data_1.png")
 
-![Before drop]("images/epoch_100_data_1.png")
+![Before drop]("images/epoch_100_data_2.png")
 
 As seen, the smaller segments (the prostate and rectum) are simply ignored. Due to their rarity and small size,
 the loss function likely punishes the model more for wrongly identifying these two organs than for identifying them.
@@ -79,10 +79,10 @@ The data from rangpur came pre-segmented into testing, validation, and testing d
 Specifically, there are 11460 training samples, 660 validation samples, and 540 testing samples.
 Since this distribution gave a reasonable distribution of data, it was kept.
 
-Requirements
+# Requirements
 torch torchvision numpy matplotlib tqdm nibabel
 
-References:
+# References:
 
 This project was built off of the 2D binary image classification example on blackboard.
 A link to this example's source code can be found here:
