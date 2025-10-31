@@ -241,7 +241,7 @@ def plot_loss(losses, loss_type='dice'):
 def main():
     # Create datasets with subset for faster training/demo
     # Set subset_size=None to use full dataset, or specify a number for quick demo
-    subset_size = 500  # Use 2000 samples for demo
+    subset_size = 2000  # Use 2000 samples for demo
     # subset_size = None  # Uncomment this to use full dataset
 
     print("🔄 Loading datasets (normalized to zero mean & unit std)...")
@@ -272,7 +272,7 @@ def main():
 
     # 1 input channel because grayscale, 6 output channels because 6 segments
     model = modules.SimpleUNet(in_channels=1, out_channels=6, dropout_p=0.2)
-    losses = train(model, train_loader, validate_dataset, epochs=21, lr=0.001, visualize_every=10)
+    losses = train(model, train_loader, validate_dataset, epochs=101, lr=0.001, visualize_every=25)
     plot_loss(losses, loss_type='dice')
 
 if __name__ == "__main__":

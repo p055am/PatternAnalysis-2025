@@ -78,12 +78,16 @@ def evaluate_model(model_path, test_dataset, num_classes=6):
     print(f"Mean Dice Score: {dice_scores.mean():.4f}")
     return dice_scores
 
+def main():
+    # Runs the evaluation
+    print("Getting testing data")
+    test_img_path = dataset.get_image_path_hip_mri('test', 'image')
+    test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
+    test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path)
+    print(f"Number of test samples: {len(test_dataset)}")
 
-# Runs the evaluation
-print("Getting testing data")
-test_img_path = dataset.get_image_path_hip_mri('test', 'image')
-test_mask_path = dataset.get_image_path_hip_mri('test', 'mask')
-test_dataset = dataset.DataSegmenter2D(test_img_path, test_mask_path)
-print(f"Number of test samples: {len(test_dataset)}")
+    evaluate_model('models/long_training.pth', test_dataset)
 
-evaluate_model('unet_hip_mri.pth', test_dataset)
+
+if __name__ == '__main__':
+    main()
